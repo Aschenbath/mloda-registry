@@ -51,8 +51,15 @@ from opentelemetry.trace import StatusCode
 from mloda.community.extenders.otel import OtelExtender
 from mloda.community.extenders.otel import otel_extender as otel_extender_module
 from mloda.community.extenders.otel.otel_multiprocessing import env_carrier
+from mloda.community.extenders.shared.classification import CLASSIFICATION_KEY
 from mloda.community.extenders.shared.step_run_id import owner_name, step_run_id
 from mloda.community.extenders.shared.teardown import CLOSE_TIMEOUT
+from mloda.community.extenders.shared.tests.classification_helpers import (
+    InternalGroup,
+    PiiGroup,
+    UnknownGroup,
+    classified_step,
+)
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
 from mloda.testing.extenders.flush import ProviderCloseTestMixin
 from mloda.testing.extenders.hook_context import make_hook_context
@@ -77,6 +84,7 @@ from mloda.testing.extenders.runners import (
     run_failing_feature,
     run_feature,
     run_joined_features,
+    run_two_features,
     run_value_int,
 )
 
@@ -2339,6 +2347,44 @@ class TestOtelExtenderRunAll:
         attrs = calculate[0].attributes or {}
         assert not any(key.startswith("mloda.declared.") for key in attrs), attrs
 
+    @pytest.mark.parametrize("mode", [ParallelizationMode.SYNC, ParallelizationMode.MULTIPROCESSING])
+    def test_run_all_calculate_spans_carry_the_effective_classification(
+        self, tmp_path: Path, mode: ParallelizationMode, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    ) -> None:
+        monkeypatch.setattr(
+            PyArrowDataOpsTestDataCreator,
+            "declared_attributes",
+            classmethod(lambda cls, features: {CLASSIFICATION_KEY: "pii"}),
+        )
+        marker_path = tmp_path / "spans.jsonl"
+        provider = RebuildingSpanCaptureProvider(marker_path=marker_path, records=True)
+        flight_server = (
+            request.getfixturevalue("flight_server") if mode == ParallelizationMode.MULTIPROCESSING else None
+        )
+
+        run_two_features(
+            OtelExtender(tracer_provider=provider, classification_undeclared="public"),
+            parallelization_modes={mode},
+            flight_server=flight_server,
+        )
+
+        records = read_span_records(marker_path)
+        calculate_records = [record for record in records if record["name"].startswith("calculate ")]
+        assert len(calculate_records) == 2, records
+        for record in calculate_records:
+            assert record["attributes"].get(CLASSIFICATION_KEY) == "pii", record
+
+    def test_run_all_without_a_declaration_uses_the_undeclared_level(self, tmp_path: Path) -> None:
+        marker_path = tmp_path / "spans.jsonl"
+        provider = RebuildingSpanCaptureProvider(marker_path=marker_path, records=True)
+
+        run_two_features(OtelExtender(tracer_provider=provider, classification_undeclared="internal"))
+
+        records = read_span_records(marker_path)
+        calculate_records = [record for record in records if record["name"].startswith("calculate ")]
+        assert len(calculate_records) == 2, records
+        assert {record["attributes"].get(CLASSIFICATION_KEY) for record in calculate_records} == {"internal"}
+
     def test_run_all_produces_expected_spans_and_leaves_result_unchanged(
         self, otel_capture: tuple[TracerProvider, InMemorySpanExporter]
     ) -> None:
@@ -2360,6 +2406,7 @@ class TestOtelExtenderRunAll:
             assert span.attributes is not None
             assert span.attributes.get("mloda.feature.name") == "value_int"
             assert span.attributes.get("mloda.compute_framework.name") == "PyArrowTable"
+            assert CLASSIFICATION_KEY not in span.attributes
 
     @pytest.mark.parametrize("mode", [ParallelizationMode.SYNC, ParallelizationMode.MULTIPROCESSING])
     @pytest.mark.parametrize("parenting", ["run_id", "carrier"])
@@ -2525,6 +2572,72 @@ class TestOtelExtenderTraceScopeOption:
 
     def test_plan_map_is_bounded_at_1024_by_default(self) -> None:
         assert otel_extender_module._MAX_PLAN_SPANS == 1024
+
+
+def _calculate_classification(exporter: InMemorySpanExporter) -> list[Any]:
+    spans = [span for span in exporter.get_finished_spans() if span.name.startswith("calculate ")]
+    return [(span.attributes or {}).get(CLASSIFICATION_KEY) for span in spans]
+
+
+class TestOtelExtenderClassificationOption:
+    def test_unknown_classification_undeclared_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="pii"):
+            OtelExtender(classification_undeclared="secret")
+
+    def test_a_multi_output_step_span_carries_the_most_restrictive_level(
+        self, otel_capture: tuple[TracerProvider, InMemorySpanExporter]
+    ) -> None:
+        provider, exporter = otel_capture
+        otel = OtelExtender(tracer_provider=provider, classification_undeclared="public")
+        steps = (classified_step(InternalGroup, ("a",)), classified_step(PiiGroup, ("b",)))
+        otel.on_run_start(_run("run-1"), _plan("plan-1"), steps)
+
+        with make_hook_context(run_id="run-1", feature_names=("a", "b")).activate():
+            otel(lambda: None)
+
+        assert _calculate_classification(exporter) == ["pii"]
+
+    @pytest.mark.parametrize("raise_on_error", [False, True])
+    def test_an_unresolvable_plan_warns_without_a_level_or_refuses_the_run(
+        self,
+        otel_capture: tuple[TracerProvider, InMemorySpanExporter],
+        caplog: pytest.LogCaptureFixture,
+        raise_on_error: bool,
+    ) -> None:
+        provider, exporter = otel_capture
+        otel = OtelExtender(tracer_provider=provider, classification_undeclared="public", raise_on_error=raise_on_error)
+        steps = (classified_step(UnknownGroup, ("a",)),)
+
+        if raise_on_error:
+            with pytest.raises(ValueError):
+                otel.on_run_start(_run("run-1"), _plan("plan-1"), steps)
+            return
+
+        with caplog.at_level(logging.WARNING):
+            otel.on_run_start(_run("run-1"), _plan("plan-1"), steps)
+        with make_hook_context(run_id="run-1", feature_names=("a",)).activate():
+            otel(lambda: None)
+
+        messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("OtelExtender" in m and "ValueError" in m for m in messages), messages
+        assert _calculate_classification(exporter) == [None]
+
+    def test_a_pickled_copy_taken_after_run_start_still_sets_the_attribute_and_complete_forgets_it(
+        self, otel_capture: tuple[TracerProvider, InMemorySpanExporter]
+    ) -> None:
+        provider, exporter = otel_capture
+        otel = OtelExtender(tracer_provider=provider, classification_undeclared="public")
+        otel.on_run_start(_run("run-1"), _plan("plan-1"), (classified_step(PiiGroup, ("a",)),))
+        clone = pickle.loads(pickle.dumps(otel))  # nosec
+        clone._tracer_provider = provider
+
+        with make_hook_context(run_id="run-1", feature_names=("a",)).activate():
+            clone(lambda: None)
+        _complete_run(otel, "run-1")
+        with make_hook_context(run_id="run-1", feature_names=("a",)).activate():
+            otel(lambda: None)
+
+        assert _calculate_classification(exporter) == ["pii", None]
 
 
 class TestOtelExtenderRunScopeFullRuns:
