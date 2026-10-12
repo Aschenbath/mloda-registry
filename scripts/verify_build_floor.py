@@ -12,6 +12,7 @@ import re
 import subprocess  # nosec
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -26,11 +27,6 @@ SHARED_CONFIG = REPO_ROOT / "config" / "shared.toml"
 # Only the lower bound matters: "setuptools>=77.0.1" and "setuptools >= 77.0.1, < 90" both floor at 77.0.1.
 SETUPTOOLS_FLOOR_RE = re.compile(r"^setuptools\s*>=\s*([^\s,;]+)")
 
-# The path prefix the generator reads as proprietary, which emits a LicenseRef instead of an SPDX id.
-PROPRIETARY_PATH_PREFIX = "mloda/enterprise"
-
-LICENSE_FORMS = ("apache", "proprietary")
-
 
 def declared_setuptools_floor(requires: list[str] | None = None) -> str:
     """The setuptools lower bound of a [build-system].requires list, config/shared.toml's by default."""
@@ -44,12 +40,7 @@ def declared_setuptools_floor(requires: list[str] | None = None) -> str:
     raise ValueError(f"no setuptools lower bound in build-system requires: {requires!r}")
 
 
-def license_form(path: str) -> str:
-    """The license form the generator emits for a package path."""
-    return "proprietary" if path.startswith(PROPRIETARY_PATH_PREFIX) else "apache"
-
-
-def license_sample_packages(packages: dict[str, dict[str, Any]]) -> dict[str, str]:
+def license_sample_packages(packages: dict[str, dict[str, Any]], license_form: Callable[[str], str]) -> dict[str, str]:
     """First package name per license form; setuptools validates a LicenseRef on a different path than an SPDX id."""
     samples: dict[str, str] = {}
     for pkg_name, pkg_config in packages.items():
@@ -88,16 +79,18 @@ def main() -> int:
         cleanup_build_dirs,
         cleanup_egg_info,
         find_wheels,
+        gen,
         get_wheel_metadata,
         load_packages_config,
+        missing_license_files,
     )
 
     floor = declared_setuptools_floor()
     print(f"Verifying the declared build floor: setuptools=={floor}")
 
     packages = load_packages_config()
-    samples = license_sample_packages(packages)
-    missing = [form for form in LICENSE_FORMS if form not in samples]
+    samples = license_sample_packages(packages, gen.license_form)
+    missing = [form for form in gen.LICENSE_FORMS if form not in samples]
     if missing:
         print(f"\n❌ config/packages.toml declares no package for license form(s): {missing}")
         return 1
@@ -115,7 +108,7 @@ def main() -> int:
                 print(f"\n❌ {setup_error}")
                 return 1
 
-            for form in LICENSE_FORMS:
+            for form in gen.LICENSE_FORMS:
                 pkg_name = samples[form]
                 print(f"\nBuilding {pkg_name} ({form} license) at setuptools=={floor}...")
                 result = build_wheel_with(venv_python(venv), REPO_ROOT / packages[pkg_name]["path"], out_dir)
@@ -129,8 +122,16 @@ def main() -> int:
                     continue
 
                 # A dropped license field would still build, so the metadata has to carry the form back.
-                if "License-Expression:" not in get_wheel_metadata(wheels[0]):
+                metadata = get_wheel_metadata(wheels[0])
+                if "License-Expression:" not in metadata:
                     errors.append(f"{pkg_name}: {wheels[0].name} METADATA has no 'License-Expression:' line")
+                    continue
+
+                missing_files = missing_license_files(metadata, packages[pkg_name])
+                if missing_files:
+                    errors.append(
+                        f"{pkg_name}: {wheels[0].name} METADATA has no 'License-File:' line for {missing_files}"
+                    )
                     continue
 
                 print(f"  ✓ {wheels[0].name}")
