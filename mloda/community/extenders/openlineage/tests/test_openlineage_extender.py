@@ -41,6 +41,7 @@ from mloda.steward import (
     PlanContext,
     PlanStep,
     RunContext,
+    pickle_failure_reason,
 )
 from mloda.user import PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
@@ -588,17 +589,26 @@ class TestOpenLineageExtenderPickling:
         assert isinstance(first, OpenLineageClient)
         assert first is second
 
-    def test_dropped_injected_client_copy_believes_it_owns_its_client(self) -> None:
+    def test_dropped_injected_client_copy_believes_it_owns_its_client(self, caplog: pytest.LogCaptureFixture) -> None:
         """After a drop, the copy must recognize it now owns/self-builds its client, not still think
         a client was injected - else a second pickle of the copy would wrongly treat its self-built
         client as "injected" and try (and fail) to pickle it as-is again."""
-        extender = OpenLineageExtender(
-            client=OpenLineageClient(transport=LockHoldingTransport()), use_sdk_defaults=True
-        )
+        client = OpenLineageClient(transport=LockHoldingTransport())
+        reason = pickle_failure_reason(client)
+        extender = OpenLineageExtender(client=client, use_sdk_defaults=True)
 
-        copy = pickle.loads(pickle.dumps(extender))  # nosec
+        with caplog.at_level(logging.WARNING):
+            copy = pickle.loads(pickle.dumps(extender))  # nosec
+            pickle.dumps(extender)  # nosec
 
         assert copy._owns_client is True
+        assert copy._client is None
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            f"OpenLineageExtender drops an injected client when pickled or copied because it isn't picklable "
+            f"({reason}); the copy is inert unless use_sdk_defaults=True, which lets it build its own client in "
+            "its own process, e.g. under MULTIPROCESSING."
+        ]
 
     def test_self_built_client_is_dropped_on_pickle_and_rebuilt_by_copy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(openlineage_extender_module, "OpenLineageClient", _PicklableFakeClient)
@@ -621,15 +631,26 @@ class TestOpenLineageExtenderPickling:
         assert extender._finalizer.peek()[0] is extender
         assert extender._finalizer.alive
 
-    def test_client_published_before_ownership_flag_is_still_dropped_on_pickle(self) -> None:
+    @pytest.mark.parametrize(
+        "make_client",
+        [
+            pytest.param(lambda: cast(OpenLineageClient, _PicklableFakeClient()), id="picklable"),
+            pytest.param(lambda: OpenLineageClient(transport=LockHoldingTransport()), id="unpicklable"),
+        ],
+    )
+    def test_client_published_before_ownership_flag_is_still_dropped_on_pickle(
+        self, caplog: pytest.LogCaptureFixture, make_client: Callable[[], OpenLineageClient]
+    ) -> None:
         """Ownership must follow from use_sdk_defaults with no injected client, not from a flag that
         could lag a lazy build publishing _client."""
         extender = OpenLineageExtender(use_sdk_defaults=True)
-        extender._client = cast(OpenLineageClient, _PicklableFakeClient())
+        extender._client = make_client()
 
-        copy = pickle.loads(pickle.dumps(extender))  # nosec
+        with caplog.at_level(logging.WARNING):
+            copy = pickle.loads(pickle.dumps(extender))  # nosec
 
         assert copy._client is None
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
 class TestOpenLineageExtenderLazyClientInit:
