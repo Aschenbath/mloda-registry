@@ -161,6 +161,7 @@ _EXPECTED_RECORD_KEYS = {
     "data_access_format",
     "data_access_identity_is_fallback",
     "data_access_declared_attributes",
+    "feature_group_declared_attributes",
     "policy_version",
     "enforced",
     "phase",
@@ -634,9 +635,16 @@ def _load(
         return extender(lambda *_: "loaded", *args)
 
 
-def _calculate(extender: Callable[..., Any], body: Callable[[], Any], feature_group_class: str = _OUTER_CLASS) -> Any:
+def _calculate(
+    extender: Callable[..., Any],
+    body: Callable[[], Any],
+    feature_group_class: str = _OUTER_CLASS,
+    declared_attributes: dict[str, str | int | float | bool] | None = None,
+) -> Any:
     """Run body as one wrapped calculate call under a present tenant_id."""
-    with make_hook_context(feature_group_class=feature_group_class, tenant_id="tenant-1").activate():
+    with make_hook_context(
+        feature_group_class=feature_group_class, tenant_id="tenant-1", declared_attributes=declared_attributes
+    ).activate():
         return extender(body)
 
 
@@ -645,9 +653,10 @@ def _record_for_loads(
     args: tuple[Any, ...] = (),
     *,
     declared: Sequence[dict[str, str | int | float | bool] | None] | None = None,
+    group_declared: dict[str, str | int | float | bool] | None = None,
 ) -> dict[str, Any]:
     """The record of one calculate call that ran the given (identity, format[, is_fallback]) loads, each called
-    with args; declared holds one declaration per load."""
+    with args; declared holds one declaration per load, group_declared the calculate context's."""
     sink = InMemoryAuditSink()
     extender = AuditExtender(sink=sink)
 
@@ -662,7 +671,7 @@ def _record_for_loads(
                 declared=declared[index] if declared else None,
             )
 
-    _calculate(extender, body)
+    _calculate(extender, body, declared_attributes=group_declared)
 
     assert len(sink.records) == 1
     return sink.records[0]
@@ -1493,7 +1502,12 @@ _CARRIER_SPAN_ID = "00f067aa0ba902b7"
 _TRACEPARENT = f"00-{_CARRIER_TRACE_ID}-{_CARRIER_SPAN_ID}-01"
 
 
-def _write_gate_record(kind: str, fail_closed: bool, identity_present: bool) -> dict[str, Any] | None:
+def _write_gate_record(
+    kind: str,
+    fail_closed: bool,
+    identity_present: bool,
+    declared_attributes: dict[str, str | int | float | bool] | None = None,
+) -> dict[str, Any] | None:
     """The one record a calculate, FEATURE_GROUP_MATCHED or RUN_START call writes (None when it writes nothing);
     a refusal is swallowed here. Identity present means tenant, project and principal."""
     sink = InMemoryAuditSink()
@@ -1517,7 +1531,14 @@ def _write_gate_record(kind: str, fail_closed: bool, identity_present: bool) -> 
                 if kind == "MATCHED"
                 else {}
             )
-            with make_hook_context(hook=hook, run_id=_RUN_UUID, plan_id="plan-1", **unresolved, **identity).activate():
+            with make_hook_context(
+                hook=hook,
+                run_id=_RUN_UUID,
+                plan_id="plan-1",
+                declared_attributes=declared_attributes,
+                **unresolved,
+                **identity,
+            ).activate():
                 extender(lambda: None)
     assert len(sink.records) <= 1
     return sink.records[0] if sink.records else None
@@ -1618,7 +1639,7 @@ class TestAuditExtenderRecordV2:
     def test_decision_enforced_and_phase_matrix(
         self, kind: str, fail_closed: bool, identity_present: bool, expected: tuple[str, bool, str] | None
     ) -> None:
-        record = _write_gate_record(kind, fail_closed, identity_present)
+        record = _write_gate_record(kind, fail_closed, identity_present, declared_attributes={"license": "a"})
 
         if expected is None:
             assert record is None
@@ -1627,8 +1648,47 @@ class TestAuditExtenderRecordV2:
         assert record["record_version"] == 2
         assert (record["decision"], record["enforced"], record["phase"]) == expected
         assert record["compliant"] is identity_present
+        assert record["feature_group_declared_attributes"] == ({"license": "a"} if kind == "calculate" else None)
         if record["enforced"]:
             assert record["start_time"] == record["event_time"]
+
+    @pytest.mark.parametrize(
+        ("declared", "expected"),
+        [
+            pytest.param({}, {}, id="empty"),
+            pytest.param(None, None, id="unreadable"),
+            pytest.param({"license": "a", "scale": float("nan")}, {"license": "a"}, id="non_finite_float"),
+            pytest.param(
+                {"text": "x", "flag": True, "count": 1, "scale": 0.5},
+                {"text": "x", "flag": True, "count": 1, "scale": 0.5},
+                id="types_preserved",
+            ),
+        ],
+    )
+    def test_a_calculate_record_carries_the_filtered_group_declaration(
+        self, declared: dict[str, Any] | None, expected: dict[str, Any] | None
+    ) -> None:
+        record = _calculate_record(declared_attributes=declared)
+
+        recorded = record["feature_group_declared_attributes"]
+        assert recorded == expected
+        if expected is not None:
+            assert type(recorded) is dict
+            assert {k: type(v) for k, v in recorded.items()} == {k: type(v) for k, v in expected.items()}
+            assert json.loads(json.dumps(recorded)) == expected
+
+    def test_an_error_record_carries_the_group_declaration(self) -> None:
+        sink = InMemoryAuditSink()
+
+        def failing() -> None:
+            raise RuntimeError("boom")
+
+        with make_hook_context(tenant_id="t", principal="svc", declared_attributes={"license": "a"}).activate():
+            with pytest.raises(RuntimeError, match="boom"):
+                AuditExtender(sink=sink)(failing)
+
+        assert sink.records[0]["status"] == "error"
+        assert sink.records[0]["feature_group_declared_attributes"] == {"license": "a"}
 
     @pytest.mark.parametrize("kind", ["MATCHED", "RUN_START"])
     def test_plan_and_run_start_refusals_have_no_step_run_id(self, kind: str) -> None:
@@ -3649,9 +3709,12 @@ class TestAuditExtenderDataAccess:
     def test_load_with_a_declaration_records_a_plain_json_dict(self) -> None:
         declared: dict[str, str | int | float | bool] = {"license": "dl-de/by-2-0", "scale": 0.001}
 
-        record = _record_for_loads([(_BUCKET_KEY, "CsvReader")], declared=[declared])
+        group_declared: dict[str, str | int | float | bool] = {"license": "group-license"}
+
+        record = _record_for_loads([(_BUCKET_KEY, "CsvReader")], declared=[declared], group_declared=group_declared)
 
         assert record["data_access_declared_attributes"] == [declared]
+        assert record["feature_group_declared_attributes"] == group_declared
         assert type(record["data_access_declared_attributes"][0]) is dict
         assert json.loads(json.dumps(record["data_access_declared_attributes"])) == [declared]
 
@@ -4384,6 +4447,7 @@ class TestAuditExtenderClassificationRunAll:
         assert records[0]["deny_reason"] == "classification_above_clearance"
         assert records[0]["feature_names"] == [_DERIVED]
         assert records[0]["classification"] == "pii"
+        assert records[0]["feature_group_declared_attributes"] is None
         assert counting.calls == 0
         # Marker file covers MULTIPROCESSING: a worker's own `calls` copy would be invisible here.
         assert not marker_path.exists()
@@ -4407,6 +4471,8 @@ class TestAuditExtenderClassificationRunAll:
         for record in records:
             assert record["decision"] == "allow"
             assert record["classification"] == "pii"
+            is_root = record["feature_group_class"].endswith(MlodaTestingClassPiiRoot.get_class_name())
+            assert record["feature_group_declared_attributes"] == ({CLASSIFICATION_KEY: "pii"} if is_root else {})
 
     def test_a_masked_derivative_of_pii_is_allowed_for_an_internal_principal(self, tmp_path: Path) -> None:
         audit_path = tmp_path / "audit.ndjson"
