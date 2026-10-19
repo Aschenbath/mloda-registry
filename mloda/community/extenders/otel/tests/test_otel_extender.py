@@ -2552,9 +2552,10 @@ class TestOtelExtenderRunAll:
         }, records
 
 
-def _plan(plan_id: str, structure_hash: str | None = None) -> PlanContext:
+def _plan(plan_id: str, structure_hash: str | None = None, origin: Any = None) -> PlanContext:
     return PlanContext(
         structure_hash=structure_hash,
+        origin=origin,
         plan_id=plan_id,
         tenant_id=None,
         project_id=None,
@@ -2573,8 +2574,10 @@ def _start_run(
     plan_id: str = "plan-1",
     carrier: dict[str, str] | None = None,
     structure_hash: str | None = None,
+    origin: str | None = None,
 ) -> None:
-    otel.on_run_start(_run(run_id, plan_id, carrier), Mock(plan_id=plan_id, structure_hash=structure_hash), ())
+    plan = Mock(plan_id=plan_id, structure_hash=structure_hash, origin=origin)
+    otel.on_run_start(_run(run_id, plan_id, carrier), plan, ())
 
 
 def _complete_run(otel: OtelExtender, run_id: str, status: Any = "succeeded", error_type: str | None = None) -> None:
@@ -2907,27 +2910,45 @@ class TestOtelExtenderRunScopeFullRuns:
             assert assert_well_formed_trace(spans).name == "mloda.run"
         assert len(_named(exporter, "mloda.run")) == 2
 
+    @staticmethod
+    def _kwargs(provider: TracerProvider) -> dict[str, Any]:
+        return {
+            "compute_frameworks": [PyArrowTable],
+            "plugin_collector": PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator}),
+            "function_extender": {OtelExtender(tracer_provider=provider)},
+        }
+
     def test_prepare_failing_on_an_unresolvable_feature_leaves_one_error_plan_span(
         self, otel_capture: tuple[TracerProvider, InMemorySpanExporter]
     ) -> None:
         provider, exporter = otel_capture
-        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator})
 
         with pytest.raises(FeatureResolutionError, match="mloda_testing_otel_unresolvable"):
-            mloda.prepare(
-                ["mloda_testing_otel_unresolvable"],
-                compute_frameworks=[PyArrowTable],
-                plugin_collector=plugin_collector,
-                function_extender={OtelExtender(tracer_provider=provider)},
-            )
+            mloda.prepare(["mloda_testing_otel_unresolvable"], **self._kwargs(provider))
 
         plan = assert_well_formed_trace(exporter.get_finished_spans())
         assert plan.name == "mloda.plan"
         assert _named(exporter, "mloda.run") == []
         assert plan.status.status_code == StatusCode.ERROR
+        assert (plan.attributes or {})["mloda.plan.origin"] == "prepare"
         assert (plan.attributes or {})["error.type"] == (
             f"{FeatureResolutionError.__module__}.{FeatureResolutionError.__qualname__}"
         )
+
+    @pytest.mark.parametrize("preflight", ["explain", "diagnose"])
+    def test_a_failing_explain_or_diagnose_leaves_no_spans(
+        self, otel_capture: tuple[TracerProvider, InMemorySpanExporter], preflight: str
+    ) -> None:
+        provider, exporter = otel_capture
+        call = getattr(mloda, preflight)
+        # explain raises on the unresolvable feature; diagnose returns an incomplete diagnosis
+        expectation = pytest.raises(FeatureResolutionError) if preflight == "explain" else contextlib.nullcontext()
+
+        with expectation:
+            result = call(["mloda_testing_otel_unresolvable"], **self._kwargs(provider))
+            assert result.complete is False
+
+        assert exporter.get_finished_spans() == ()
 
 
 class TestOtelExtenderPlanScopeFullRuns:
@@ -2950,6 +2971,8 @@ class TestOtelExtenderPlanScopeFullRuns:
         assert runs[0].parent is not None
         assert runs[0].parent.span_id == _ids(plan[0])[1]
         assert (plan[0].attributes or {}).get("mloda.plan.id") == (runs[0].attributes or {}).get("mloda.plan.id")
+        assert (plan[0].attributes or {})["mloda.plan.origin"] == "run_all"
+        assert (runs[0].attributes or {})["mloda.plan.origin"] == "run_all"
 
     def test_prepared_plan_run_twice_shares_one_trace_with_two_run_roots(
         self, otel_capture: tuple[TracerProvider, InMemorySpanExporter]
@@ -2969,6 +2992,7 @@ class TestOtelExtenderPlanScopeFullRuns:
             assert run.parent is not None
             assert run.parent.span_id == _ids(root)[1]
         assert len({(run.attributes or {})["mloda.run.id"] for run in runs}) == 2
+        assert {(run.attributes or {})["mloda.plan.origin"] for run in runs} == {"prepare"}
 
     def test_caller_active_span_parents_the_plan_span_and_is_a_link_on_the_run_root(
         self, otel_capture: tuple[TracerProvider, InMemorySpanExporter]
@@ -3008,14 +3032,18 @@ class TestOtelExtenderRootSpanHooks:
     """Lifecycle hooks driven directly (all fire in the parent process)."""
 
     @pytest.mark.parametrize("structure_hash", ["abc123", None])
+    @pytest.mark.parametrize("origin", ["run_all", None])
     def test_on_run_start_and_complete_emit_the_root_with_attributes(
-        self, otel_capture: tuple[TracerProvider, InMemorySpanExporter], structure_hash: str | None
+        self,
+        otel_capture: tuple[TracerProvider, InMemorySpanExporter],
+        structure_hash: str | None,
+        origin: str | None,
     ) -> None:
         provider, exporter = otel_capture
         otel = OtelExtender(tracer_provider=provider)
         run_id = str(uuid.uuid4())
 
-        _start_run(otel, run_id, plan_id="plan-x", structure_hash=structure_hash)
+        _start_run(otel, run_id, plan_id="plan-x", structure_hash=structure_hash, origin=origin)
         assert exporter.get_finished_spans() == ()
         _complete_run(otel, run_id)
 
@@ -3025,6 +3053,10 @@ class TestOtelExtenderRootSpanHooks:
         assert span.attributes is not None
         assert span.attributes["mloda.run.id"] == run_id
         assert span.attributes["mloda.plan.id"] == "plan-x"
+        if origin is None:
+            assert "mloda.plan.origin" not in span.attributes
+        else:
+            assert span.attributes["mloda.plan.origin"] == origin
         if structure_hash is None:
             assert "mloda.plan.structure_hash" not in span.attributes
         else:
@@ -3242,6 +3274,7 @@ class TestOtelExtenderPlanSpanHooks:
         ],
     )
     @pytest.mark.parametrize("structure_hash", ["abc123", None])
+    @pytest.mark.parametrize("origin", ["prepare", None])
     def test_plan_span_has_attributes_and_status(
         self,
         otel_capture: tuple[TracerProvider, InMemorySpanExporter],
@@ -3249,21 +3282,26 @@ class TestOtelExtenderPlanSpanHooks:
         outcome: LifecycleOutcome,
         is_error: bool,
         structure_hash: str | None,
+        origin: str | None,
     ) -> None:
         provider, exporter = otel_capture
         otel = OtelExtender(tracer_provider=provider, trace_scope=trace_scope)
         completed = dataclasses.replace(
-            _plan("plan-1", structure_hash),
+            _plan("plan-1", structure_hash, origin),
             created_at=datetime.datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=datetime.timezone.utc),
         )
 
-        otel.on_plan_start(_plan("plan-1"))
+        otel.on_plan_start(_plan("plan-1", origin=origin))
         assert exporter.get_finished_spans() == ()
         otel.on_plan_complete(completed, outcome)
 
         span = single_span(exporter)
         assert span.name == "mloda.plan"
         assert (span.attributes or {})["mloda.plan.id"] == "plan-1"
+        if origin is None:
+            assert "mloda.plan.origin" not in (span.attributes or {})
+        else:
+            assert (span.attributes or {})["mloda.plan.origin"] == origin
         if structure_hash is None:
             assert "mloda.plan.structure_hash" not in (span.attributes or {})
         else:
@@ -3281,6 +3319,42 @@ class TestOtelExtenderPlanSpanHooks:
         if trace_scope == "run":
             assert span.start_time == 1767323045678901000
             assert span.parent is None
+
+    @pytest.mark.parametrize("origin", ["explain", "diagnose"])
+    @pytest.mark.parametrize(
+        ("trace_scope", "status"),
+        [
+            ("run", "failed"),
+            ("plan", "failed"),
+            ("plan", "cancelled"),
+            ("plan", "succeeded"),
+        ],
+    )
+    def test_preflight_plan_never_ends_in_error_and_is_not_kept_for_runs(
+        self,
+        otel_capture: tuple[TracerProvider, InMemorySpanExporter],
+        origin: str,
+        trace_scope: Any,
+        status: Any,
+    ) -> None:
+        provider, exporter = otel_capture
+        otel = OtelExtender(tracer_provider=provider, trace_scope=trace_scope)
+        error_type = "builtins.KeyboardInterrupt" if status == "cancelled" else "KeyError"
+
+        otel.on_plan_start(_plan("plan-1", origin=origin))
+        assert "plan-1" not in otel._plan_ints
+        otel.on_plan_complete(_plan("plan-1", origin=origin), LifecycleOutcome(status=status, error_type=error_type))
+
+        assert "plan-1" not in otel._plan_ints
+        if trace_scope == "run":
+            assert exporter.get_finished_spans() == ()
+            return
+        span = single_span(exporter)
+        assert span.status.status_code == StatusCode.UNSET
+        assert "error.type" not in (span.attributes or {})
+        assert (span.attributes or {})["mloda.plan.origin"] == origin
+        if status == "cancelled":
+            assert (span.attributes or {})["mloda.cancel.type"] == error_type
 
     @pytest.mark.parametrize(
         ("trace_scope", "status"), [("plan", "succeeded"), ("run", "failed")], ids=["plan_succeeded", "run_failed"]
