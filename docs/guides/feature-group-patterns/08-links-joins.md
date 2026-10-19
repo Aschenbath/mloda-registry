@@ -262,7 +262,7 @@ link = Link.inner(
 
 A `JoinSpec` matches its feature group and its subclasses, so a link declared on a base class also joins the subclasses and injects the side's join key into them; each subclass must provide that column. Matching rules: [Polymorphic Link Matching](https://github.com/mloda-ai/mloda/blob/main/docs/docs/in_depth/join_data.md#polymorphic-link-matching).
 
-A link side can therefore have several members, and a subclass may run on another compute framework (its own `compute_framework_rule()`). From the release after mloda 0.15.1, a consumer that joins two members of one side on different frameworks plans only when the other link side runs on one of the members' frameworks and the consumer can run there too. Otherwise planning fails with a `ValueError` whose listed rule names the consumer and both members and contains `Read one member of the link side per consumer`.
+A link side can therefore have several members, and a subclass may run on another compute framework (its own `compute_framework_rule()`). Since mloda 0.16.0, a consumer that joins two members of one side on different frameworks is checked at plan time. Core's table [One consumer joining two members of one link side](https://github.com/mloda-ai/mloda/blob/0.16.0/docs/docs/in_depth/join_data.md#polymorphic-link-matching) lists the layouts that plan: the other side on one member's framework with the consumer there too, or the other side as one feature group on a framework no member uses, with the consumer on that framework reading both members directly (inner and outer joins, or a left or right join that keeps the other side). Other layouts fail planning with a `ValueError` that names the consumer and the members and tells you to `read one member of the link side per consumer`.
 
 Remedy: split the consumer into one FeatureGroup per member, each requesting that member and the other side in `input_features()`.
 
@@ -271,6 +271,7 @@ The check has limits:
 - mloda 0.15.1 and older do not have it: some of these layouts plan, others fail with unrelated join errors.
 - It does not cover append and union links.
 - Members that share a compute framework pass it, but one base-class link over both is still ambiguous (`There are more than one solution for the join`).
+- A planned layout is not always correct: with the other side on one member's framework, a left or right join that keeps the member side can return wrong rows when the members hold different keys, and under `THREADING` planned layouts can fail intermittently with a missing column.
 
 ## When to Use Each Approach
 
