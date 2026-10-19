@@ -635,6 +635,23 @@ def generate_pyproject(
     ]
     lines.append(f"authors = [{', '.join(author_strs)}]")
 
+    for source, value in (
+        ("shared [project].keywords", shared["project"].get("keywords", [])),
+        (f"{pkg_name} keywords", pkg_config.get("keywords", [])),
+    ):
+        if not isinstance(value, list) or not all(isinstance(k, str) for k in value):
+            raise ValueError(f"{pkg_name}: {source} must be a list of strings (keywords), got {value!r}")
+
+    keywords = list(dict.fromkeys([*shared["project"].get("keywords", []), *pkg_config.get("keywords", [])]))
+    if keywords:
+        lines.append(f"keywords = {to_toml_list(keywords)}")
+
+    classifiers = list(shared["project"].get("classifiers", []))
+    if pkg_config.get("py_typed") and "Typing :: Typed" not in classifiers:
+        classifiers.append("Typing :: Typed")
+    if classifiers:
+        lines.append(f"classifiers = {to_toml_list(classifiers)}")
+
     lines.append(f"dependencies = {to_toml_list(deps)}")
 
     lines.append(f"requires-python = {quote_toml_basic_string(shared['project']['requires-python'])}")
