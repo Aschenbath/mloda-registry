@@ -406,7 +406,7 @@ The OTel and OpenLineage mixins both enforce the same observability mandate: a w
 
 Required host hooks: `extender_class`, `make_extender`, `own_failure`. Optional: `raise_on_error_default`, `expected_hooks`, `pickled_copy_environment`, `supports_warning_only` (return `False` for a host with no warning-only mode, such as a gate declaring `never_fall_back`; the `run_all` wrapped-failure test then uses the default `raise_on_error`), `context_identity` (a dict of `tenant_id` / `project_id` / `principal` for an identity-gated extender; carried by every contract context and `run_all`; defaults to empty), `has_backend_sink` (return `True` for an extender with an external sink, and override `ambient_sink_environment` plus `sink_resolution_spy`, and optionally `ambient_sink_captured(spy)`, which returns what the ambient sink(s) the spy handed out captured once the call is done; its base default `None` opts out of the emission check, for a host that cannot expose a probe; `make_unconfigured_extender`/`make_sdk_defaults_extender` default to `extender_class()()` and `extender_class()(use_sdk_defaults=True)`), `supports_pickled_sink_capture` plus `injected_sink_capture` (`True` when a picklable injected sink survives pickling; defaults to `False`), `supports_unpicklable_sink_degrade` plus `make_unpicklable_sink_extender` (`True` when the host trial-pickles its sink and drops+warns instead of hard-failing pickling; defaults to `False`), `sink_noun` (the word the drop-warning uses for the sink, e.g. `"tracer_provider"`; `None` skips noun-specific assertions), `unpicklable_sink_failure_type` (the pickle-failure exception type name the drop-warning names; defaults to `"TypeError"`, correct for a sink holding a `threading.Lock`).
 
-A host with `has_backend_sink() == True` must also implement `make_extender_with_sink_probe` (an extender wired to a fresh, per-instance in-memory sink, plus a zero-arg callable returning what that exact sink captured; must be per-instance state, never shared/class-level, or the identity test below is vacuous). Real-worker `MULTIPROCESSING` coverage is opt-in, separate from `has_backend_sink`: override `supports_real_worker_sink` to `True` and implement `make_real_worker_extender_and_marker(tmp_path)` (an extender wired to a file-backed sink under `tmp_path`, plus the marker file a spawned worker's emission writes to) only on a host that actually wants this coverage; it spawns a real subprocess, so it is deliberately not inherited automatically the way `has_backend_sink` is, and a lightweight self-test host should leave it at the default `False`.
+A host with `has_backend_sink() == True` must also implement `make_injected_and_sdk_defaults_extender` (an extender with an injected sink and `use_sdk_defaults=True`) and `make_extender_with_sink_probe` (an extender wired to a fresh, per-instance in-memory sink, plus a zero-arg callable returning what that exact sink captured; must be per-instance state, never shared/class-level, or the identity test below is vacuous). Real-worker `MULTIPROCESSING` coverage is opt-in, separate from `has_backend_sink`: override `supports_real_worker_sink` to `True` and implement `make_real_worker_extender_and_marker(tmp_path)` (an extender wired to a file-backed sink under `tmp_path`, plus the marker file a spawned worker's emission writes to) only on a host that actually wants this coverage; it spawns a real subprocess, so it is deliberately not inherited automatically the way `has_backend_sink` is, and a lightweight self-test host should leave it at the default `False`.
 
 The real-worker test needs `ParallelRunnerFlightServer`, which has no public re-export and cannot be imported anywhere under `mloda/` (this repo's internal-import guard forbids it). Its `flight_server` fixture instead lives in a `conftest.py` at the repo root, outside the guard's scan, and the contract test reaches it lazily via `request.getfixturevalue("flight_server")` rather than a parameter or an import. A downstream host outside this repo that opts into `supports_real_worker_sink()` must supply its own `flight_server` fixture: this repo's lives in its root `conftest.py`, but the published `mloda-testing` package does not ship one.
 
@@ -496,7 +496,80 @@ A host that must record the raw URI overrides `test_otel_input_data_load_query_s
 
 Helpers: `make_span_capture`, `make_picklable_span_capture`, `single_span`, `single_span_attributes`, `inject_parent_carrier`, `RebuildingSpanCaptureProvider`, `FileSpanExporter` (writes finished span names to a marker file, for `make_real_worker_extender_and_marker`; `records=True` on either writes one JSON record per span, with ids and attributes, instead of a bare name), `read_span_records` (parses those records back).
 
-A metrics extender hosts `ExtenderContractTestMixin` with `ProviderCloseTestMixin`; `RebuildingMetricCaptureProvider` (`mloda.testing.extenders.otel`) is the picklable meter provider for its `make_real_worker_extender_and_marker`. It writes exported metric names to the marker file only on `force_flush()`, so the extender must flush its provider in `close()`.
+### Metrics extenders
+
+There is no metrics counterpart of `OtelExtenderTestMixin`. A metrics extender hosts `ExtenderContractTestMixin` with `ProviderCloseTestMixin` (mind its `close_timeout` and `sink_noun` requirements above) and implements the sink hooks itself; `ambient_sink_environment` can keep its default, since `meter_provider_resolution_spy` patches the ambient getter. Metric helpers in `mloda.testing.extenders.otel`:
+
+- `make_metric_capture`: an SDK `MeterProvider` with an `InMemoryMetricReader`, for `make_extender` and the sink probe
+- `metric_names`: the metric names in collected `MetricsData` (empty for `None`)
+- `meter_provider_resolution_spy`: records the reader behind each ambient `get_meter_provider` resolution; return it from `sink_resolution_spy`
+- `RebuildingMetricCaptureProvider`: picklable provider for `make_real_worker_extender_and_marker`, writes metric names to the marker file only on `force_flush()`, so `close()` must flush
+- `FileMetricExporter`: the marker-file exporter behind it
+
+```python
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from typing import Any
+from unittest.mock import patch
+
+from mloda.steward import Extender
+from opentelemetry.sdk.metrics import MeterProvider
+
+from mloda.testing.extenders.contract import ExtenderContractTestMixin
+from mloda.testing.extenders.flush import ProviderCloseTestMixin
+from mloda.testing.extenders.otel import make_metric_capture, meter_provider_resolution_spy, metric_names
+
+
+class TestMyMetricsExtenderContract(ExtenderContractTestMixin, ProviderCloseTestMixin):
+    @classmethod
+    def extender_class(cls) -> type[MyMetricsExtender]:
+        return MyMetricsExtender
+
+    def make_extender(self, *, raise_on_error: bool | None = None) -> MyMetricsExtender:
+        provider, _ = make_metric_capture()
+        if raise_on_error is None:
+            return MyMetricsExtender(meter_provider=provider)
+        return MyMetricsExtender(meter_provider=provider, raise_on_error=raise_on_error)
+
+    def own_failure(self) -> AbstractContextManager[Any]:
+        return patch.object(MeterProvider, "get_meter", side_effect=RuntimeError("boom"))
+
+    @classmethod
+    def raise_on_error_default(cls) -> bool:
+        return False
+
+    @classmethod
+    def has_backend_sink(cls) -> bool:
+        return True
+
+    def sink_resolution_spy(self) -> AbstractContextManager[list[Any]]:
+        return meter_provider_resolution_spy()
+
+    def ambient_sink_captured(self, spy: list[Any]) -> list[Any] | None:
+        return [name for reader in spy for name in metric_names(reader.get_metrics_data())]
+
+    def make_extender_with_sink_probe(self) -> tuple[Extender, Callable[[], Any]]:
+        provider, reader = make_metric_capture()
+        return MyMetricsExtender(meter_provider=provider), lambda: metric_names(reader.get_metrics_data())
+
+    def make_injected_and_sdk_defaults_extender(self) -> Extender:
+        provider, _ = make_metric_capture()
+        return MyMetricsExtender(meter_provider=provider, use_sdk_defaults=True)
+
+    @classmethod
+    def sink_noun(cls) -> str | None:
+        return "meter_provider"
+
+    @classmethod
+    def ambient_provider_getter(cls) -> str:
+        return "opentelemetry.metrics.get_meter_provider"
+
+    @classmethod
+    def flushed_signal(cls) -> str:
+        return "metrics"
+```
+
+Optional on top: `expected_hooks`, `sink_probe_expected_content` (metric names the probe and a real worker's marker must contain, such as `{"mloda.step.duration"}`), `supports_unpicklable_sink_degrade` with `make_unpicklable_sink_extender`, and `supports_real_worker_sink` with `make_real_worker_extender_and_marker` (needs a `flight_server` fixture, see above). [`TestOtelMetricsExtenderContract`](https://github.com/mloda-ai/mloda-registry/blob/main/mloda/community/extenders/otel/tests/test_otel_metrics_extender.py) is the full host; its `ProviderWarningTestMixin` base is internal to this repo and not part of `mloda-testing`.
 
 ### OpenLineageExtenderTestMixin
 
