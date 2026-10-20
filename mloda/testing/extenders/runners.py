@@ -206,6 +206,34 @@ def run_joined_features(
     raise AssertionError(f"No result table with {column_name} found")
 
 
+def write_csv(directory: Path) -> Path:
+    """Write the small `alpha,beta` CSV fixture to `directory/data.csv`; return its path."""
+    path = directory / "data.csv"
+    path.write_text("alpha,beta\n1,2\n3,4\n", encoding="utf-8")
+    return path
+
+
+def _csv_alpha_request(directory: Path) -> tuple[Feature, PluginCollector]:
+    """Write the CSV fixture into `directory`; return its `alpha` Feature and the ReadFileFeature collector."""
+    path = write_csv(directory)
+    return (
+        Feature("alpha", options={CsvReader.__name__: str(path)}),
+        PluginCollector.enabled_feature_groups({ReadFileFeature}),
+    )
+
+
+def prepare_csv_feature(directory: Path, *extenders: Extender) -> mloda:
+    """Write the CSV fixture into `directory` and prepare (but do not run) its `alpha` column; call
+    session.run() to execute it."""
+    feature, plugin_collector = _csv_alpha_request(directory)
+    return mloda.prepare(
+        [feature],
+        compute_frameworks=[PyArrowTable],
+        plugin_collector=plugin_collector,
+        function_extender=set(extenders),
+    )
+
+
 def run_csv_feature(
     directory: Path,
     *extenders: Extender,
@@ -216,11 +244,9 @@ def run_csv_feature(
     """Write a small CSV into `directory` and run its `alpha` column through the pipeline, firing a nested
     INPUT_DATA_LOAD hook with `data_access_identity` set to the CSV's path; return the column. Optional
     parallelization_modes, flight_server and carrier forward straight to mloda.run_all."""
-    path = directory / "data.csv"
-    path.write_text("alpha,beta\n1,2\n3,4\n", encoding="utf-8")
-    plugin_collector = PluginCollector.enabled_feature_groups({ReadFileFeature})
+    feature, plugin_collector = _csv_alpha_request(directory)
     results = mloda.run_all(
-        [Feature("alpha", options={CsvReader.__name__: str(path)})],
+        [feature],
         compute_frameworks=[PyArrowTable],
         plugin_collector=plugin_collector,
         function_extender=set(extenders),

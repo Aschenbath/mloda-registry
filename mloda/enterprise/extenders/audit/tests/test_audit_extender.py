@@ -33,6 +33,7 @@ from mloda.steward import (
     CompositeExtender,
     Extender,
     ExtenderHook,
+    FeatureResolutionError,
     HookContext,
     LifecycleOutcome,
     PlanContext,
@@ -40,10 +41,19 @@ from mloda.steward import (
     RunContext,
     verified_context,
 )
-from mloda.user import Feature, FeatureName, Options, ParallelizationMode, PluginCollector, mloda
+from mloda.user import (
+    DataAccessCollection,
+    Feature,
+    FeatureName,
+    Options,
+    ParallelizationMode,
+    PluginCollector,
+    mloda,
+)
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 from mloda_plugins.feature_group.input_data.read_file_feature import ReadFileFeature
 from mloda_plugins.feature_group.input_data.read_files.csv import CsvReader
+from mloda_plugins.feature_group.input_data.read_files.parquet import ParquetReader
 
 from mloda.community.extenders.shared import termination
 from mloda.community.extenders.shared.classification import CLASSIFICATION_KEY
@@ -78,9 +88,11 @@ from mloda.testing.extenders.hook_context import make_hook_context
 from mloda.testing.extenders.runners import (
     CountingExtender,
     expected_value_int,
+    prepare_csv_feature,
     prepare_value_int,
     run_csv_feature,
     run_value_int,
+    write_csv,
 )
 
 _BOTH_POSTURES = pytest.mark.parametrize("fail_closed", [False, True])
@@ -174,6 +186,7 @@ _EXPECTED_RECORD_KEYS = {
     "trace_id",
     "span_id",
     "classification",
+    "reader_class",
 }
 
 _FINGERPRINT = re.compile(r"[0-9a-f]{12}")
@@ -249,9 +262,63 @@ class MlodaTestingClassMasked(FeatureGroup):
         return {cls.get_class_name(): [None for _ in data[_PII_COLUMN].to_pylist()]}
 
 
+_CSV_PATH_OPTION = "mloda_testing_class_csv_path"
+
+
+class MlodaTestingClassCsvMasked(FeatureGroup):
+    """Masking step declaring internal over a CSV column; the path comes from its options."""
+
+    masking = True
+
+    def input_features(self, options: Options, feature_name: FeatureName) -> set[Feature] | None:
+        return {Feature("alpha", options={CsvReader.__name__: options.get(_CSV_PATH_OPTION)})}
+
+    @classmethod
+    def compute_framework_rule(cls) -> set[type[ComputeFramework]]:
+        return {PyArrowTable}
+
+    @classmethod
+    def declared_attributes(cls, features: FeatureSet | None) -> Mapping[str, str | int | float | bool]:
+        return {CLASSIFICATION_KEY: "internal"}
+
+    @classmethod
+    def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
+        return {cls.get_class_name(): [None for _ in data["alpha"].to_pylist()]}
+
+
 _DERIVED = MlodaTestingClassDerived.get_class_name()
 _MASKED = MlodaTestingClassMasked.get_class_name()
+_CSV_MASKED = MlodaTestingClassCsvMasked.get_class_name()
 _CLASS_GROUPS = {MlodaTestingClassPiiRoot, MlodaTestingClassDerived, MlodaTestingClassMasked}
+
+
+def _qualname(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _declare_csv_level(monkeypatch: pytest.MonkeyPatch, level: str) -> None:
+    monkeypatch.setattr(
+        CsvReader, "declared_attributes", classmethod(lambda cls, features: {CLASSIFICATION_KEY: level})
+    )
+
+
+def _reader_probe(**overrides: Any) -> HookContext:
+    """A planning-time INPUT_DATA_MATCH context: no feature group, framework or run."""
+    context: dict[str, Any] = {
+        "hook": ExtenderHook.INPUT_DATA_MATCH,
+        "feature_group_class": None,
+        "feature_group_version": None,
+        "compute_framework_name": None,
+        "run_id": None,
+        "plan_id": "plan-1",
+        "tenant_id": "t",
+        "principal": "svc",
+        "feature_names": ("alpha",),
+        "reader_class": CsvReader,
+        "declared_attributes": {CLASSIFICATION_KEY: "pii"},
+        **overrides,
+    }
+    return make_hook_context(**context)
 
 
 def _clear_internal(tenant: str | None, principal: str | None) -> str:
@@ -856,6 +923,10 @@ class TestAuditExtenderClassificationContract(TestAuditExtenderFailClosedContrac
     """A fail_closed gate with a classification policy satisfies the same contract; the policy is dropped on pickle."""
 
     @classmethod
+    def expected_hooks(cls) -> set[ExtenderHook] | None:
+        return {*(super().expected_hooks() or set()), ExtenderHook.INPUT_DATA_MATCH}
+
+    @classmethod
     def context_identity(cls) -> dict[str, str]:
         return {"tenant_id": _TENANT, "principal": _PRINCIPAL}
 
@@ -966,6 +1037,39 @@ class TestAuditExtenderConstruction:
     def test_a_classification_policy_with_an_unknown_undeclared_level_raises_value_error(self) -> None:
         with pytest.raises(ValueError):
             ClassificationPolicy(clearance=lambda tenant, principal: "pii", undeclared="secret")
+
+    def test_a_classification_policy_gates_readers_by_default(self) -> None:
+        policy = ClassificationPolicy(clearance=lambda tenant, principal: "pii", undeclared="public")
+
+        assert policy.gate_readers is True
+
+    @pytest.mark.parametrize("value", ["yes", 1, None], ids=["str", "int", "none"])
+    def test_a_classification_policy_with_a_non_bool_gate_readers_raises(self, value: Any) -> None:
+        with pytest.raises(TypeError):
+            ClassificationPolicy(clearance=lambda tenant, principal: "pii", undeclared="public", gate_readers=value)
+
+    @pytest.mark.parametrize("gate_readers", [True, False])
+    def test_a_classified_gate_wraps_the_reader_hook_only_with_gate_readers(self, gate_readers: bool) -> None:
+        policy = ClassificationPolicy(
+            clearance=lambda tenant, principal: "pii", undeclared="public", gate_readers=gate_readers
+        )
+
+        extender = _classified(InMemoryAuditSink(), classification=policy)
+
+        assert (ExtenderHook.INPUT_DATA_MATCH in extender.wraps()) is gate_readers
+        assert ExtenderHook.FEATURE_GROUP_MATCHED in extender.wraps()
+
+    def test_the_reader_hook_is_not_wrapped_without_a_classification_policy(self) -> None:
+        assert ExtenderHook.INPUT_DATA_MATCH not in AuditExtender(sink=InMemoryAuditSink(), fail_closed=True).wraps()
+
+    @pytest.mark.parametrize("gate_readers", [True, False])
+    def test_a_pickled_classified_gate_keeps_its_wrapped_hooks(self, gate_readers: bool) -> None:
+        policy = ClassificationPolicy(
+            clearance=lambda tenant, principal: "pii", undeclared="public", gate_readers=gate_readers
+        )
+        extender = _classified(InMemoryAuditSink(), classification=policy)
+
+        assert pickle.loads(pickle.dumps(extender)).wraps() == extender.wraps()  # nosec
 
     def test_a_classification_policy_is_frozen(self) -> None:
         policy = ClassificationPolicy(clearance=lambda tenant, principal: "pii", undeclared="public")
@@ -1988,6 +2092,7 @@ class TestAuditExtenderClassificationGate:
         assert record["feature_names"] == ["derived"]
         assert record["classification"] == "pii"
         assert record["policy_version"] == _POLICY_VERSION
+        assert record["reader_class"] is None
         assert set(record) == _EXPECTED_RECORD_KEYS
 
     def test_only_requested_offending_names_are_listed_sorted_with_their_most_restrictive_level(self) -> None:
@@ -2244,6 +2349,225 @@ class TestAuditExtenderClassificationGate:
         assert _ndjson(audit_path)[0]["deny_reason"] == "classification_above_clearance"
         manifests = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
         assert [manifest["run_id"] for manifest in manifests] == [_RUN_UUID]
+
+    @pytest.mark.parametrize(
+        ("declared", "clearance"),
+        [("pii", "internal"), ("internal", "public"), ("public", None)],
+        ids=["pii_over_internal", "internal_over_public", "public_over_none"],
+    )
+    def test_a_reader_declared_above_the_clearance_is_refused_with_one_deny_record_and_its_probe_never_runs(
+        self, declared: str, clearance: str | None
+    ) -> None:
+        sink = InMemoryAuditSink()
+        extender = _classified(sink, clearance)
+        call = _CountingCall()
+
+        with _reader_probe(declared_attributes={CLASSIFICATION_KEY: declared}).activate():
+            with pytest.raises(ClassificationDeniedError):
+                extender(call)
+
+        assert call.calls == 0
+        assert len(sink.records) == 1
+        record = sink.records[0]
+        assert record["hook"] == "INPUT_DATA_MATCH"
+        assert record["phase"] == "plan"
+        assert record["run_id"] is None
+        assert record["plan_id"] == "plan-1"
+        assert record["decision"] == "deny"
+        assert record["enforced"] is True
+        assert record["status"] == "error"
+        assert record["error_type"] == _qualname(ClassificationDeniedError)
+        assert record["deny_reason"] == "classification_above_clearance"
+        assert record["classification"] == declared
+        assert record["reader_class"] == _qualname(CsvReader)
+        assert record["feature_names"] == ["alpha"]
+        assert record["feature_group_class"] is None
+        assert record["compute_framework_name"] is None
+        assert record["feature_group_declared_attributes"] is None
+        assert record["step_run_id"] is None
+        assert record["policy_version"] == _POLICY_VERSION
+        assert set(record) == _EXPECTED_RECORD_KEYS
+
+    def test_a_reader_refused_for_several_features_in_one_plan_writes_one_deny_record_per_feature_set(self) -> None:
+        sink = InMemoryAuditSink()
+        extender = _classified(sink, "internal")
+        call = _CountingCall()
+
+        probes = (("alpha",), ("beta",), ("alpha",), ("beta", "alpha"), ("alpha", "beta"))
+        for feature_names in probes:
+            with _reader_probe(feature_names=feature_names).activate():
+                with pytest.raises(ClassificationDeniedError):
+                    extender(call)
+
+        assert call.calls == 0
+        assert [r["feature_names"] for r in sink.records] == [["alpha"], ["beta"], ["beta", "alpha"]]
+
+    def test_the_same_reader_refused_under_another_plan_writes_its_own_deny_record(self) -> None:
+        sink = InMemoryAuditSink()
+        extender = _classified(sink, "internal")
+
+        for plan_id in ("plan-1", "plan-2", "plan-1"):
+            with _reader_probe(plan_id=plan_id).activate():
+                with pytest.raises(ClassificationDeniedError):
+                    extender(_CountingCall())
+
+        assert [r["plan_id"] for r in sink.records] == ["plan-1", "plan-2"]
+
+    def test_the_same_reader_refused_for_another_reason_in_one_plan_writes_its_own_deny_record(self) -> None:
+        sink = InMemoryAuditSink()
+        extender = _classified(sink, "internal")
+
+        for declared in ({CLASSIFICATION_KEY: "pii"}, None, {CLASSIFICATION_KEY: "pii"}, None):
+            with _reader_probe(declared_attributes=declared).activate():
+                with pytest.raises(ClassificationDeniedError):
+                    extender(_CountingCall())
+
+        assert [r["deny_reason"] for r in sink.records] == [
+            "classification_above_clearance",
+            "classification_unresolved",
+        ]
+
+    def test_another_refused_reader_in_one_plan_writes_its_own_deny_record(self) -> None:
+        sink = InMemoryAuditSink()
+        extender = _classified(sink, "internal")
+
+        for reader in (CsvReader, ParquetReader):
+            with _reader_probe(reader_class=reader).activate():
+                with pytest.raises(ClassificationDeniedError):
+                    extender(_CountingCall())
+
+        assert [r["reader_class"] for r in sink.records] == [_qualname(CsvReader), _qualname(ParquetReader)]
+
+    def test_the_refusal_message_names_no_level_or_identity(self) -> None:
+        extender = _classified(InMemoryAuditSink(), "internal")
+
+        with _reader_probe(tenant_id="tenant-xyz", principal="alice").activate():
+            with pytest.raises(ClassificationDeniedError) as excinfo:
+                extender(_CountingCall())
+
+        for secret in ("pii", "internal", "tenant-xyz", "alice"):
+            assert secret not in str(excinfo.value)
+
+    @pytest.mark.parametrize(("declared", "clearance"), [("pii", "pii"), ("internal", "pii"), ("public", "public")])
+    def test_a_reader_at_or_below_the_clearance_runs_its_probe_and_writes_nothing(
+        self, declared: str, clearance: str
+    ) -> None:
+        sink = InMemoryAuditSink()
+        extender = _classified(sink, clearance)
+        call = _CountingCall()
+
+        with _reader_probe(declared_attributes={CLASSIFICATION_KEY: declared}).activate():
+            assert extender(call) == 42
+
+        assert call.calls == 1
+        assert sink.records == []
+
+    def test_the_clearance_is_called_with_the_planning_identity(self) -> None:
+        clearance = Mock(return_value="pii")
+
+        with _reader_probe(tenant_id="t-1", principal="alice").activate():
+            _classified(InMemoryAuditSink(), clearance)(_CountingCall())
+
+        clearance.assert_called_once_with("t-1", "alice")
+
+    @pytest.mark.parametrize("declared", [{}, {"license": "mit"}], ids=["empty", "no_level_key"])
+    def test_an_undeclared_reader_is_allowed_without_calling_the_clearance(self, declared: dict[str, str]) -> None:
+        sink = InMemoryAuditSink()
+        clearance = Mock(return_value="public")
+        extender = _classified(sink, clearance, classification=ClassificationPolicy(clearance, undeclared="pii"))
+        call = _CountingCall()
+
+        with _reader_probe(declared_attributes=declared).activate():
+            assert extender(call) == 42
+
+        assert call.calls == 1
+        clearance.assert_not_called()
+        assert sink.records == []
+
+    @pytest.mark.parametrize(
+        ("declared", "clearance"),
+        [
+            pytest.param(None, "pii", id="declaration_unreadable"),
+            pytest.param({CLASSIFICATION_KEY: "secret"}, "pii", id="unknown_declared_level"),
+            pytest.param({CLASSIFICATION_KEY: 3}, "pii", id="non_str_declared_level"),
+            pytest.param({CLASSIFICATION_KEY: "pii"}, Mock(side_effect=RuntimeError("boom")), id="clearance_raises"),
+            pytest.param({CLASSIFICATION_KEY: "pii"}, lambda tenant, principal: "secret", id="clearance_unknown"),
+        ],
+    )
+    def test_an_unresolvable_reader_level_is_refused_as_unresolved(
+        self, declared: dict[str, Any] | None, clearance: Any
+    ) -> None:
+        sink = InMemoryAuditSink()
+        call = _CountingCall()
+
+        with _reader_probe(declared_attributes=declared).activate():
+            with pytest.raises(ClassificationDeniedError):
+                _classified(sink, clearance)(call)
+
+        assert call.calls == 0
+        assert len(sink.records) == 1
+        assert sink.records[0]["hook"] == "INPUT_DATA_MATCH"
+        assert sink.records[0]["decision"] == "deny"
+        assert sink.records[0]["deny_reason"] == "classification_unresolved"
+        assert sink.records[0]["classification"] is None
+        assert sink.records[0]["reader_class"] == _qualname(CsvReader)
+
+    def test_a_copy_with_a_dropped_policy_refuses_a_reader_as_unresolved_even_when_it_would_be_cleared(self) -> None:
+        duplicated = pickle.loads(pickle.dumps(_classified(InMemoryAuditSink(), "pii")))  # nosec
+        call = _CountingCall()
+
+        with _reader_probe(declared_attributes={CLASSIFICATION_KEY: "public"}).activate():
+            with pytest.raises(ClassificationDeniedError):
+                duplicated(call)
+
+        assert call.calls == 0
+        assert [r["deny_reason"] for r in cast(InMemoryAuditSink, duplicated.sink).records] == [
+            "classification_unresolved"
+        ]
+
+    def test_a_reader_probe_without_a_tenant_is_refused_first_as_missing_identity(self) -> None:
+        sink = InMemoryAuditSink()
+        clearance = Mock(return_value="pii")
+        call = _CountingCall()
+
+        with _reader_probe(tenant_id=None).activate():
+            with pytest.raises(IdentityRequiredError):
+                _classified(sink, clearance)(call)
+
+        clearance.assert_not_called()
+        assert call.calls == 0
+        assert [(r["hook"], r["deny_reason"], r["reader_class"]) for r in sink.records] == [
+            ("INPUT_DATA_MATCH", "missing_tenant_id", _qualname(CsvReader))
+        ]
+
+    def test_a_reader_deny_record_is_sealed_under_its_plan_id(self, tmp_path: Path) -> None:
+        audit_path, manifest_path = _sealing_config(tmp_path)
+        extender = _classified(
+            NdjsonAuditSink(audit_path),
+            "internal",
+            audit_path=audit_path,
+            manifest_path=manifest_path,
+            signer=_hmac_signer(),
+        )
+
+        with _reader_probe().activate():
+            with pytest.raises(ClassificationDeniedError):
+                extender(_CountingCall())
+        extender.on_plan_complete(
+            PlanContext(
+                plan_id="plan-1",
+                tenant_id="t",
+                project_id=None,
+                principal="svc",
+                created_at=datetime.now(),
+                structure_hash=None,
+            ),
+            LifecycleOutcome(status="failed"),
+        )
+
+        assert _ndjson(audit_path)[0]["deny_reason"] == "classification_above_clearance"
+        manifests = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
+        assert [manifest["run_id"] for manifest in manifests] == ["plan-1"]
 
 
 class TestAuditExtenderClose:
@@ -4302,12 +4626,18 @@ class TestAuditExtenderRunAll:
         assert records[0]["data_access_identity"] == ["str"]
         assert records[0]["data_access_identity_is_fallback"] == [True]
 
+    @pytest.mark.parametrize(
+        ("declared", "expected"),
+        [
+            pytest.param({"license": "dl-de/by-2-0"}, {"license": "dl-de/by-2-0"}, id="portable"),
+            pytest.param({"license": "a", "scale": float("nan")}, {"license": "a"}, id="non_finite_float_dropped"),
+            pytest.param({"license": "a", "scale": 2**63}, {"license": "a"}, id="oversized_int_dropped"),
+        ],
+    )
     def test_run_all_csv_read_with_a_declaring_reader_records_the_declaration(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: dict[str, Any], expected: dict[str, Any]
     ) -> None:
-        monkeypatch.setattr(
-            CsvReader, "declared_attributes", classmethod(lambda cls, features: {"license": "dl-de/by-2-0"})
-        )
+        monkeypatch.setattr(CsvReader, "declared_attributes", classmethod(lambda cls, features: declared))
         audit_path = tmp_path / "audit.ndjson"
         extender = AuditExtender(sink=NdjsonAuditSink(audit_path))
 
@@ -4318,7 +4648,7 @@ class TestAuditExtenderRunAll:
         sink_records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
         records = [record for record in sink_records if record["feature_group_class"] == read_class]
         assert len(records) == 1
-        assert records[0]["data_access_declared_attributes"] == [{"license": "dl-de/by-2-0"}]
+        assert records[0]["data_access_declared_attributes"] == [expected]
 
     def test_run_all_without_verified_context_denies_but_still_runs(self) -> None:
         sink = InMemoryAuditSink()
@@ -4458,6 +4788,7 @@ class TestAuditExtenderClassificationRunAll:
         assert records[0]["feature_names"] == [_DERIVED]
         assert records[0]["classification"] == "pii"
         assert records[0]["feature_group_declared_attributes"] is None
+        assert records[0]["reader_class"] is None
         assert counting.calls == 0
         # Marker file covers MULTIPROCESSING: a worker's own `calls` copy would be invisible here.
         assert not marker_path.exists()
@@ -4510,25 +4841,137 @@ class TestAuditExtenderClassificationRunAll:
         assert [r["deny_reason"] for r in denies] == ["classification_above_clearance"]
         assert denies[0]["principal"] == "bob"
 
-    @pytest.mark.parametrize(("clearance", "denied"), [("internal", True), ("pii", False)])
-    def test_a_reader_declared_pii_root_is_gated_through_run_csv_feature(
-        self, clearance: str, denied: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_rerun_of_one_prepared_reader_declared_session_is_checked_per_principal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            CsvReader, "declared_attributes", classmethod(lambda cls, features: {CLASSIFICATION_KEY: "pii"})
-        )
+        _declare_csv_level(monkeypatch, "pii")
         sink = InMemoryAuditSink()
-        gate = _classified(sink, clearance)
+        gate = _classified(sink, lambda tenant, principal: "internal" if principal == "carol" else "pii")
+
+        with verified_context(tenant_id="t", principal="alice"):
+            session = prepare_csv_feature(tmp_path, gate)
+        with verified_context(tenant_id="t", principal="bob"):
+            session.run()
+        with verified_context(tenant_id="t", principal="carol"):
+            with pytest.raises(ClassificationDeniedError):
+                session.run()
+
+        denies = [r for r in sink.records if r["decision"] == "deny"]
+        assert [(r["hook"], r["deny_reason"], r["principal"]) for r in denies] == [
+            ("RUN_START", "classification_above_clearance", "carol")
+        ]
+
+    def test_a_reader_declared_above_the_clearance_is_refused_at_plan_time_before_its_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _declare_csv_level(monkeypatch, "pii")
+        probes: list[list[str]] = []
+        original = CsvReader.match_subclass_data_access
+
+        def spy(data_access: Any, feature_names: list[str], options: Options) -> Any:
+            probes.append(feature_names)
+            return original(data_access, feature_names, options)
+
+        monkeypatch.setattr(CsvReader, "match_subclass_data_access", staticmethod(spy))
+        sink = InMemoryAuditSink()
 
         with verified_context(tenant_id="t", principal="svc"):
-            if denied:
-                with pytest.raises(ClassificationDeniedError):
-                    run_csv_feature(tmp_path, gate)
-            else:
-                run_csv_feature(tmp_path, gate)
+            with pytest.raises(FeatureResolutionError, match="ClassificationDeniedError"):
+                run_csv_feature(tmp_path, _classified(sink, "internal"))
 
-        if denied:
-            assert [r["deny_reason"] for r in sink.records] == ["classification_above_clearance"]
-            assert sink.records[0]["feature_names"] == ["alpha"]
-        else:
-            assert {r["classification"] for r in sink.records} == {"pii"}
+        assert probes == []
+        assert len(sink.records) == 1
+        record = sink.records[0]
+        assert record["hook"] == "INPUT_DATA_MATCH"
+        assert record["phase"] == "plan"
+        assert record["run_id"] is None
+        assert record["deny_reason"] == "classification_above_clearance"
+        assert record["classification"] == "pii"
+        assert record["feature_names"] == ["alpha"]
+        assert record["reader_class"] == _qualname(CsvReader)
+
+    def test_a_reader_declared_pii_root_is_probed_and_every_record_carries_the_level_for_a_pii_principal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _declare_csv_level(monkeypatch, "pii")
+        sink = InMemoryAuditSink()
+
+        with verified_context(tenant_id="t", principal="svc"):
+            run_csv_feature(tmp_path, _classified(sink, "pii"))
+
+        assert sink.records
+        assert {r["classification"] for r in sink.records} == {"pii"}
+        assert {r["reader_class"] for r in sink.records} == {None}
+
+    def test_without_gate_readers_a_reader_above_the_clearance_falls_back_to_the_run_start_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _declare_csv_level(monkeypatch, "pii")
+        sink = InMemoryAuditSink()
+        policy = ClassificationPolicy(clearance=_clear_internal, undeclared="public", gate_readers=False)
+
+        with verified_context(tenant_id="t", principal="svc"):
+            with pytest.raises(ClassificationDeniedError):
+                run_csv_feature(tmp_path, _classified(sink, classification=policy))
+
+        assert [(r["hook"], r["deny_reason"]) for r in sink.records] == [
+            ("RUN_START", "classification_above_clearance")
+        ]
+        assert sink.records[0]["feature_names"] == ["alpha"]
+
+    def test_a_refused_global_scope_reader_writes_a_deny_record_per_feature_when_a_sibling_serves_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            ParquetReader, "declared_attributes", classmethod(lambda cls, features: {CLASSIFICATION_KEY: "pii"})
+        )
+        path = write_csv(tmp_path)
+        sink = InMemoryAuditSink()
+
+        with verified_context(tenant_id="t", principal="svc"):
+            results = mloda.run_all(
+                ["alpha", "beta"],
+                compute_frameworks=[PyArrowTable],
+                plugin_collector=PluginCollector.enabled_feature_groups({ReadFileFeature}),
+                data_access_collection=DataAccessCollection(files={str(path)}),
+                function_extender={_classified(sink, "internal")},
+                parallelization_modes={ParallelizationMode.SYNC},
+            )
+
+        assert results
+        denies = [r for r in sink.records if r["decision"] == "deny"]
+        assert sorted(((r["hook"], r["reader_class"], r["feature_names"]) for r in denies), key=lambda t: t[2]) == [
+            ("INPUT_DATA_MATCH", _qualname(ParquetReader), ["alpha"]),
+            ("INPUT_DATA_MATCH", _qualname(ParquetReader), ["beta"]),
+        ]
+
+    @pytest.mark.parametrize(("gate_readers", "allowed"), [(False, True), (True, False)])
+    def test_a_masked_derivative_of_a_reader_declared_pii_source_needs_gate_readers_off(
+        self, gate_readers: bool, allowed: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _declare_csv_level(monkeypatch, "pii")
+        path = write_csv(tmp_path)
+        sink = InMemoryAuditSink()
+        policy = ClassificationPolicy(clearance=_clear_internal, undeclared="public", gate_readers=gate_readers)
+        feature = Feature(_CSV_MASKED, options={_CSV_PATH_OPTION: str(path)})
+
+        def run() -> Any:
+            return mloda.run_all(
+                [feature],
+                compute_frameworks=[PyArrowTable],
+                plugin_collector=PluginCollector.enabled_feature_groups({ReadFileFeature, MlodaTestingClassCsvMasked}),
+                function_extender={_classified(sink, classification=policy)},
+                parallelization_modes={ParallelizationMode.SYNC},
+            )
+
+        with verified_context(tenant_id="t", principal="svc"):
+            if allowed:
+                assert run()
+            else:
+                with pytest.raises(FeatureResolutionError, match="ClassificationDeniedError"):
+                    run()
+
+        denies = [r for r in sink.records if r["decision"] == "deny"]
+        assert [(r["hook"], r["reader_class"]) for r in denies] == (
+            [] if allowed else [("INPUT_DATA_MATCH", _qualname(CsvReader))]
+        )

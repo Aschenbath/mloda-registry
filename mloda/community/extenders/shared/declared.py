@@ -14,8 +14,7 @@ def declared_scalars(declared: Mapping[str, Any] | None) -> dict[str, str | int 
     """A fresh dict of the str, bool, int and finite float declarations, types unchanged."""
     if declared is None:
         return {}
-    # Dropped: values that are not portable JSON numbers (non-finite floats, which allow_nan=False rejects and
-    # OpenLineage would emit as NaN; ints beyond 64 bits, which also break json.dumps past Python's int digit limit).
+    # Core's filter is internal and skips a hand-built HookContext, whose NaN json.dumps(allow_nan=False) rejects.
     return {
         key: value
         for key, value in declared.items()
