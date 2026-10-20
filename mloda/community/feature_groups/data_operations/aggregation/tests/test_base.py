@@ -10,6 +10,9 @@ from mloda.user import DataType, Feature, Options
 from mloda.community.feature_groups.data_operations.aggregation.base import (
     AggregationFeatureGroup,
 )
+from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.base import (
+    FrameAggregateFeatureGroup,
+)
 from mloda.community.feature_groups.data_operations.row_preserving.window_aggregation.base import (
     WindowAggregationFeatureGroup,
 )
@@ -285,10 +288,15 @@ class TestConfigFrameTypeOwnership:
 
     @staticmethod
     def _options(key: str, origin: str) -> Options:
-        options = Options(context={key: "sum", "in_features": "v", "partition_by": ["g"]})
+        options = Options(
+            context={key: "sum", "in_features": "v", "partition_by": ["g"], "order_by": "t", "frame_size": 3}
+        )
         if origin == "own":
             options.add_to_context("frame_type", "rolling")
         elif origin == "inherited_group":
+            options.inherit_from(Options(group={"frame_type": "rolling"}))
+        elif origin == "own_and_inherited_group":
+            options.add_to_group("frame_type", "rolling")
             options.inherit_from(Options(group={"frame_type": "rolling"}))
         elif origin == "inherited_context":
             options.inherit_from(
@@ -305,12 +313,39 @@ class TestConfigFrameTypeOwnership:
     )
     @pytest.mark.parametrize(
         ("origin", "expected"),
-        [("none", True), ("inherited_group", True), ("inherited_context", True), ("own", False)],
+        [
+            ("none", True),
+            ("inherited_group", True),
+            ("inherited_context", True),
+            ("own", False),
+            ("own_and_inherited_group", False),
+        ],
     )
     def test_config_match_depends_on_frame_type_ownership(
         self, cls: Any, key: str, origin: str, expected: bool
     ) -> None:
         assert cls.match_feature_group_criteria("my_result", self._options(key, origin), None) is expected
+
+    @pytest.mark.parametrize(
+        ("origin", "owner"),
+        [
+            ("none", AggregationFeatureGroup),
+            ("inherited_group", AggregationFeatureGroup),
+            ("inherited_context", AggregationFeatureGroup),
+            ("own", FrameAggregateFeatureGroup),
+            ("own_and_inherited_group", FrameAggregateFeatureGroup),
+        ],
+    )
+    def test_exactly_one_of_aggregation_and_frame_aggregate_claims_the_config_feature(
+        self, origin: str, owner: Any
+    ) -> None:
+        options = self._options("aggregation_type", origin)
+        claimed = {
+            cls
+            for cls in (AggregationFeatureGroup, FrameAggregateFeatureGroup)
+            if cls.match_feature_group_criteria("my_result", options, None)
+        }
+        assert claimed == {owner}
 
 
 class TestReturnDataTypeRule:
