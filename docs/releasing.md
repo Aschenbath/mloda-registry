@@ -9,8 +9,11 @@ Manual only, via GitHub Actions -> Release -> Run workflow. Nothing releases on 
 ## Flow
 
 ```text
-workflow_dispatch → semantic-release → PyPI publish
+workflow_dispatch → verify-backend-extras → semantic-release → PyPI publish
 ```
+
+First, the `verify-backend-extras` tox env builds the data-operations leaves locally and checks each backend
+extra in a clean venv; its third-party deps resolve at their newest PyPI release, as a user's install would.
 
 1. **Version bump**: semantic-release analyzes commits and updates `config/shared.toml`.
 2. **Regenerate**: `scripts/generate_pyproject.py` updates every package `pyproject.toml`
