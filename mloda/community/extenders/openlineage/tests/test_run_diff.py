@@ -569,19 +569,36 @@ class TestRunDiffRootHandling:
 
 
 class TestReadRuns:
-    def test_two_runs_in_one_file_are_grouped_with_blank_and_truncated_lines_skipped(
-        self, recorded: Events, tmp_path: Path
+    @pytest.mark.parametrize("per_line_files", [False, True], ids=["one_file", "file_per_line"])
+    def test_two_runs_are_grouped_with_blank_and_truncated_lines_skipped(
+        self, recorded: Events, tmp_path: Path, per_line_files: bool
     ) -> None:
         second = _record()
         lines = [*_dumps(recorded), "", "   ", *_dumps(second), '{"eventTime": "2026-01-01T00:0']
-        path = _write(tmp_path / "events.ndjson", lines)
+        if per_line_files:
+            files = [_write(tmp_path / f"events-{i:05d}.json", [line]) for i, line in enumerate(lines)]
+        else:
+            files = [_write(tmp_path / "events.ndjson", lines)]
 
-        runs = read_runs(path)
+        runs = read_runs(*sorted(files))
 
         assert len(runs) == 2
         for run, original in zip(runs, (recorded, second), strict=True):
             roots, steps = _split(original)
             assert run == roots + steps
+
+    def test_no_paths_read_no_runs(self) -> None:
+        assert read_runs() == []
+
+    def test_per_event_files_diff_like_the_appended_file(self, recorded: Events, tmp_path: Path) -> None:
+        files = [_write(tmp_path / f"events-{i:05d}.json", [line]) for i, line in enumerate(_dumps(recorded))]
+        appended_path = _write(tmp_path / "appended.ndjson", _dumps(recorded))
+
+        (per_event,) = read_runs(*sorted(files))
+        (appended,) = read_runs(appended_path)
+
+        assert diff_run_events(per_event, appended).changes == ()
+        assert per_event == appended
 
     def test_interleaved_runs_are_still_grouped_per_root(self, recorded: Events, tmp_path: Path) -> None:
         second = _record()
