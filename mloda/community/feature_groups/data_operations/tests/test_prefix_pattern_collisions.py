@@ -32,6 +32,10 @@ Two complementary checks run here:
 ``test_every_family_is_covered`` guards against a new family ``base.py`` being
 added without a registry entry, so nothing escapes the lint.
 
+``test_no_config_path_collisions`` covers the config path: a name matching no pattern, with a family's
+documented ``config_options``, must be claimed by that family alone. Name-only families
+(ema, ffill, sessionization) carry no ``config_options`` and are asserted to reject a config feature.
+
 The negative tests (``test_find_*_detects_*``) feed planted collisions to the
 detector functions so the guardrail is proven to fire, not merely to pass.
 """
@@ -82,17 +86,33 @@ class FamilySpec:
     # Extra Options context the family needs before its name-based match accepts (e.g. ``lookup_mapping``).
     # Merged over the shared options for this family's names only, so PERMISSIVE_OPTIONS stays config-free.
     options: dict[str, Any] = field(default_factory=dict)
+    # Documented config-path options (``in_features`` etc.); ``None`` for name-only families.
+    config_options: dict[str, Any] | None = None
 
 
 _DO = "mloda.community.feature_groups.data_operations"
 
 FAMILIES: tuple[FamilySpec, ...] = (
-    FamilySpec("aggregation", f"{_DO}.aggregation.base", "AggregationFeatureGroup", ("sales__sum_agg",)),
     FamilySpec(
-        "binning", f"{_DO}.row_preserving.binning.base", "BinningFeatureGroup", ("value__bin_5", "value__qbin_10")
+        "aggregation",
+        f"{_DO}.aggregation.base",
+        "AggregationFeatureGroup",
+        ("sales__sum_agg",),
+        config_options={"aggregation_type": "sum", "in_features": "v", "partition_by": ["g"]},
     ),
     FamilySpec(
-        "datetime", f"{_DO}.row_preserving.datetime.base", "DateTimeFeatureGroup", ("ts__year", "ts__dayofweek")
+        "binning",
+        f"{_DO}.row_preserving.binning.base",
+        "BinningFeatureGroup",
+        ("value__bin_5", "value__qbin_10"),
+        config_options={"binning_op": "bin", "n_bins": 5, "in_features": "v"},
+    ),
+    FamilySpec(
+        "datetime",
+        f"{_DO}.row_preserving.datetime.base",
+        "DateTimeFeatureGroup",
+        ("ts__year", "ts__dayofweek"),
+        config_options={"datetime_op": "year", "in_features": "v"},
     ),
     FamilySpec("ema", f"{_DO}.row_preserving.ema.base", "EmaFeatureGroup", ("price__ema_20",)),
     FamilySpec("ffill", f"{_DO}.row_preserving.ffill.base", "FfillFeatureGroup", ("sales__ffill",)),
@@ -103,6 +123,14 @@ FAMILIES: tuple[FamilySpec, ...] = (
         ("sales__sum_rolling_3", "sales__avg_7_day_window", "sales__cumsum", "sales__expanding_avg"),
         pattern_module_attrs=("_ROLLING_PATTERN", "_TIME_WINDOW_PATTERN", "_CUMULATIVE_PATTERN", "_EXPANDING_PATTERN"),
         ignore_prefix_pattern=True,
+        config_options={
+            "aggregation_type": "sum",
+            "frame_type": "rolling",
+            "frame_size": 3,
+            "in_features": "v",
+            "partition_by": ["g"],
+            "order_by": "t",
+        },
     ),
     FamilySpec(
         "lookup",
@@ -110,10 +138,21 @@ FAMILIES: tuple[FamilySpec, ...] = (
         "LookupFeatureGroup",
         ("sales__lookup",),
         options={"lookup_mapping": {"a": "b"}},
+        config_options={"in_features": "v", "lookup_mapping": {"a": "b"}},
     ),
-    FamilySpec("offset", f"{_DO}.row_preserving.offset.base", "OffsetFeatureGroup", ("sales__lag_1_offset",)),
     FamilySpec(
-        "percentile", f"{_DO}.row_preserving.percentile.base", "PercentileFeatureGroup", ("sales__p50_percentile",)
+        "offset",
+        f"{_DO}.row_preserving.offset.base",
+        "OffsetFeatureGroup",
+        ("sales__lag_1_offset",),
+        config_options={"offset_type": "first_value", "in_features": "v", "partition_by": ["g"], "order_by": "t"},
+    ),
+    FamilySpec(
+        "percentile",
+        f"{_DO}.row_preserving.percentile.base",
+        "PercentileFeatureGroup",
+        ("sales__p50_percentile",),
+        config_options={"percentile": 0.5, "in_features": "v", "partition_by": ["g"]},
     ),
     FamilySpec(
         "point_arithmetic",
@@ -122,22 +161,35 @@ FAMILIES: tuple[FamilySpec, ...] = (
         # Two operands: the documented pattern is ``{col_a}&{col_b}__{op}_point``,
         # so the one-operand form is not a valid name for this family (#403).
         ("x&y__add_point",),
+        config_options={"arithmetic_op": "add", "in_features": ("a", "b")},
     ),
-    FamilySpec("rank", f"{_DO}.row_preserving.rank.base", "RankFeatureGroup", ("sales__row_number_ranked",)),
     FamilySpec(
-        "resample", f"{_DO}.row_changing.resample.base", "ResampleFeatureGroup", ("metric__resample_60_minute_mean",)
+        "rank",
+        f"{_DO}.row_preserving.rank.base",
+        "RankFeatureGroup",
+        ("sales__row_number_ranked",),
+        config_options={"rank_type": "row_number", "in_features": "v", "partition_by": ["g"], "order_by": "t"},
+    ),
+    FamilySpec(
+        "resample",
+        f"{_DO}.row_changing.resample.base",
+        "ResampleFeatureGroup",
+        ("metric__resample_60_minute_mean",),
+        config_options={"in_features": "v", "time_column": "t", "resample_op": "60_minute_mean"},
     ),
     FamilySpec(
         "scalar_aggregate",
         f"{_DO}.row_preserving.scalar_aggregate.base",
         "ScalarAggregateFeatureGroup",
         ("value__sum_scalar",),
+        config_options={"aggregation_type": "sum", "in_features": "v"},
     ),
     FamilySpec(
         "scalar_arithmetic",
         f"{_DO}.row_preserving.scalar_arithmetic.base",
         "ScalarArithmeticFeatureGroup",
         ("value__add_constant",),
+        config_options={"arithmetic_op": "add", "in_features": "v", "constant": 2},
     ),
     FamilySpec(
         "sessionization",
@@ -145,18 +197,26 @@ FAMILIES: tuple[FamilySpec, ...] = (
         "SessionizationFeatureGroup",
         ("session__sessionize_30_minute",),
     ),
-    FamilySpec("string", f"{_DO}.string.base", "StringFeatureGroup", ("name__upper",)),
+    FamilySpec(
+        "string",
+        f"{_DO}.string.base",
+        "StringFeatureGroup",
+        ("name__upper",),
+        config_options={"string_op": "upper", "in_features": "v"},
+    ),
     FamilySpec(
         "time_bucketization",
         f"{_DO}.row_preserving.time_bucketization.base",
         "TimeBucketizationFeatureGroup",
         ("ts__floor_30_minute",),
+        config_options={"bucket_op": "floor_30_minute", "in_features": "v"},
     ),
     FamilySpec(
         "window_aggregation",
         f"{_DO}.row_preserving.window_aggregation.base",
         "WindowAggregationFeatureGroup",
         ("sales__sum_window",),
+        config_options={"aggregation_type": "sum", "in_features": "v", "partition_by": ["g"]},
     ),
 )
 
@@ -252,6 +312,19 @@ def find_collisions(
             )
             if acceptors != (spec.key,):
                 collisions.append(Collision(name, spec.key, acceptors))
+    return collisions
+
+
+def find_config_collisions(families: tuple[FamilySpec, ...], classes: dict[str, Any]) -> list[Collision]:
+    """Config-path collisions: a nameless feature with a family's ``config_options`` must match only that family."""
+    collisions: list[Collision] = []
+    for spec in families:
+        if spec.config_options is None:
+            continue
+        options = Options(context=dict(spec.config_options))
+        acceptors = tuple(key for key, cls in classes.items() if cls.match_feature_group_criteria("my_result", options))
+        if acceptors != (spec.key,):
+            collisions.append(Collision("my_result", spec.key, acceptors))
     return collisions
 
 
@@ -578,6 +651,44 @@ def test_every_family_module_is_discovered_on_disk() -> None:
     )
 
 
+# --- config-path invariants ---------------------------------------
+
+# (owner, sorted acceptors): aggregation and window_aggregation share ``aggregation_type`` and
+# ``partition_by`` and need a discriminator option to be told apart.
+KNOWN_CONFIG_OVERLAPS: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
+    {
+        ("aggregation", ("aggregation", "window_aggregation")),
+        ("window_aggregation", ("aggregation", "window_aggregation")),
+    }
+)
+
+
+def _known(collision: Collision) -> bool:
+    return (collision.owner, tuple(sorted(collision.acceptors))) in KNOWN_CONFIG_OVERLAPS
+
+
+def test_no_config_path_collisions() -> None:
+    collisions = [c for c in find_config_collisions(FAMILIES, _real_classes()) if not _known(c)]
+    assert collisions == [], "Config-path collisions across data-operation families:\n" + "\n".join(
+        f"{c.owner!r} config is accepted by {list(c.acceptors)}" for c in collisions
+    )
+
+
+def test_known_config_overlaps_still_occur() -> None:
+    actual = {(c.owner, tuple(sorted(c.acceptors))) for c in find_config_collisions(FAMILIES, _real_classes())}
+    stale = sorted(KNOWN_CONFIG_OVERLAPS - actual)
+    assert stale == [], f"Stale KNOWN_CONFIG_OVERLAPS entries (overlap no longer occurs): {stale}"
+
+
+@pytest.mark.parametrize("key", ["ema", "ffill", "sessionization"])
+def test_name_only_families_reject_a_config_feature(key: str) -> None:
+    """Name-only families claim nothing on the config path, even with their old shared options."""
+    cls = _real_classes()[key]
+    options = Options(context={"in_features": "v", "order_by": "t"})
+    assert not cls.match_feature_group_criteria("my_result", options)
+    assert next(s for s in FAMILIES if s.key == key).config_options is None
+
+
 # --- negative tests: prove the detectors actually fire ------------------------
 
 
@@ -606,6 +717,15 @@ def test_find_collisions_detects_owner_rejects() -> None:
     collisions = find_collisions(specs, PERMISSIVE_OPTIONS, {"alpha": _AcceptNone})
     assert len(collisions) == 1
     assert collisions[0].kind == "OWNER_REJECTS"
+
+
+def test_find_config_collisions_detects_multi_match() -> None:
+    specs = (FamilySpec("alpha", "m", "C", ("col__op_x",), config_options={"in_features": "v"}),)
+    collisions = find_config_collisions(specs, {"alpha": _AcceptAll, "beta": _AcceptAll})
+    assert len(collisions) == 1
+    assert collisions[0].kind == "MULTI_MATCH"
+    assert set(collisions[0].acceptors) == {"alpha", "beta"}
+    assert find_config_collisions((replace(specs[0], config_options=None),), {"alpha": _AcceptAll}) == []
 
 
 def test_find_pattern_overlaps_detects_planted_overlap() -> None:

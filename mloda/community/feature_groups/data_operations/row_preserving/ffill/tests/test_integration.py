@@ -117,12 +117,6 @@ class TestFfillIntegration(DataOpsIntegrationTestBase):
                 id="name_path",
             ),
             pytest.param(
-                "my_result",
-                {"in_features": "value_float", "order_by": 123, "partition_by": ["region"]},
-                r"option 'order_by' must be .*got int 123",
-                id="config_path",
-            ),
-            pytest.param(
                 "value_float__ffill",
                 {"order_by": ["timestamp", "region"]},
                 r"option 'order_by' must be exactly one.*got list",
@@ -150,11 +144,6 @@ class TestFfillRequiredOrderBy:
         """Control: the same pattern name WITH order_by still matches."""
         options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
         assert PyArrowFfill.match_feature_group_criteria("amount__ffill", options)
-
-    def test_config_path_missing_order_by_does_not_match(self) -> None:
-        """Config path: a config feature without order_by stays a non-match."""
-        options = Options(context={"in_features": "amount", "partition_by": ["region"]})
-        assert not PyArrowFfill.match_feature_group_criteria("my_result", options, None)
 
     def test_missing_order_by_rejected_at_discovery(self) -> None:
         """Engine level: missing order_by fails resolution, and the error names order_by, not compute."""

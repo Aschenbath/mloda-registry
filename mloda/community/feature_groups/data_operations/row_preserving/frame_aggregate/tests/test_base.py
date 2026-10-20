@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
+import re
 from typing import Any
 
 import pytest
@@ -430,9 +432,6 @@ class TestNameBasedFrameTypeInOptions:
         [
             pytest.param("sales__sum_rolling_3", "rolling", id="rolling_name"),
             pytest.param("sales__avg_7_day_window", "time", id="time_window_name"),
-            # A time frame_type option contradicting a rolling name must not trigger
-            # config-path size/unit rules.
-            pytest.param("sales__sum_rolling_3", "time", id="rolling_name_with_stray_time"),
         ],
     )
     def test_name_with_frame_type_option(self, feature_name: str, frame_type: str) -> None:
@@ -520,8 +519,8 @@ class TestHostileInFeatures:
         assert result is False, f"Config path should reject in_features: {in_features!r}"
 
 
-class TestForwardedNameMismatch:
-    """A forwarded aggregation_type that contradicts the name must raise, never be silently overridden."""
+class TestFrameNameAgreement:
+    """A frame option (forwarded or own) that contradicts the name must raise, never be silently overridden."""
 
     def test_forwarded_aggregation_type_mismatch_raises(self) -> None:
         consumer = Options(group={"aggregation_type": "max"})
@@ -530,40 +529,115 @@ class TestForwardedNameMismatch:
         with pytest.raises(ValueError):
             FrameAggregateFeatureGroup.match_feature_group_criteria("sales__sum_rolling_3", options, None)
 
-    def test_forwarded_frame_type_mismatch_raises(self) -> None:
-        consumer = Options(group={"frame_type": "time"})
+    @pytest.mark.parametrize("path", ["group", "context"])
+    def test_forwarded_frame_type_mismatch_raises_via_path(self, path: str) -> None:
         options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
-        options.inherit_from(consumer)
-        with pytest.raises(ValueError, match="frame_type"):
+        if path == "group":
+            options.inherit_from(Options(group={"frame_type": "time"}))
+        else:
+            options.inherit_from(
+                Options(context={"frame_type": "time"}), inherit_context_keys=frozenset({"frame_type"})
+            )
+        with pytest.raises(ValueError, match="frame_type") as exc_info:
             FrameAggregateFeatureGroup.match_feature_group_criteria("sales__sum_rolling_3", options, None)
+        assert "was forwarded from a consumer" in str(exc_info.value)
 
-    def test_forwarded_frame_size_mismatch_raises(self) -> None:
-        consumer = Options(group={"frame_size": 99})
+    @pytest.mark.parametrize("path", ["group", "context"])
+    def test_forwarded_frame_size_mismatch_raises_via_path(self, path: str) -> None:
         options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
-        options.inherit_from(consumer)
-        with pytest.raises(ValueError, match="frame_size"):
+        if path == "group":
+            options.inherit_from(Options(group={"frame_size": 99}))
+        else:
+            options.inherit_from(Options(context={"frame_size": 99}), inherit_context_keys=frozenset({"frame_size"}))
+        with pytest.raises(ValueError, match="frame_size") as exc_info:
             FrameAggregateFeatureGroup.match_feature_group_criteria("sales__sum_rolling_3", options, None)
+        assert "was forwarded from a consumer" in str(exc_info.value)
 
-    def test_forwarded_frame_unit_mismatch_raises(self) -> None:
-        consumer = Options(group={"frame_unit": "hour"})
+    @pytest.mark.parametrize("path", ["group", "context"])
+    def test_forwarded_frame_unit_mismatch_raises_via_path(self, path: str) -> None:
         options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
-        options.inherit_from(consumer)
-        with pytest.raises(ValueError, match="frame_unit"):
+        if path == "group":
+            options.inherit_from(Options(group={"frame_unit": "hour"}))
+        else:
+            options.inherit_from(
+                Options(context={"frame_unit": "hour"}), inherit_context_keys=frozenset({"frame_unit"})
+            )
+        with pytest.raises(ValueError, match="frame_unit") as exc_info:
             FrameAggregateFeatureGroup.match_feature_group_criteria("sales__avg_7_day_window", options, None)
+        assert "was forwarded from a consumer" in str(exc_info.value)
 
-    def test_matching_forwarded_frame_params_is_accepted(self) -> None:
-        consumer = Options(group={"frame_type": "time", "frame_size": 7, "frame_unit": "day"})
-        options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
-        options.inherit_from(consumer)
+    @pytest.mark.parametrize(
+        ("feature_name", "key", "value", "binding", "type_name"),
+        [
+            ("sales__sum_rolling_3", "frame_size", 5, "3", "int"),
+            ("sales__sum_rolling_3", "frame_type", "time", "rolling", "str"),
+            ("sales__avg_7_day_window", "frame_size", 5, "7", "int"),
+            ("sales__avg_7_day_window", "frame_unit", "hour", "day", "str"),
+            ("sales__avg_7_day_window", "frame_type", "rolling", "time", "str"),
+        ],
+    )
+    @pytest.mark.parametrize("placement", ["group", "context"])
+    def test_own_contradictory_frame_param_raises(
+        self, placement: str, feature_name: str, key: str, value: Any, binding: str, type_name: str
+    ) -> None:
+        base = {"partition_by": ["region"], "order_by": "timestamp"}
+        if placement == "group":
+            options = Options(group={key: value}, context=base)
+        else:
+            options = Options(context={key: value, **base})
+        with pytest.raises(
+            ValueError,
+            match=rf"option '{key}' is {type_name} {re.escape(repr(value))}, but the feature name encodes '{binding}'\. The name is authoritative",
+        ):
+            FrameAggregateFeatureGroup.match_feature_group_criteria(feature_name, options, None)
+
+    @pytest.mark.parametrize("wrap", [False, True], ids=["scalar", "singleton_tuple"])
+    @pytest.mark.parametrize("placement", ["group", "context"])
+    def test_own_matching_frame_params_are_accepted(self, placement: str, wrap: bool) -> None:
+        values: dict[str, Any] = {"frame_type": "time", "frame_size": 7, "frame_unit": "day"}
+        if wrap:
+            values = {k: (v,) for k, v in values.items()}
+        base = {"partition_by": ["region"], "order_by": "timestamp"}
+        if placement == "group":
+            options = Options(group=values, context=base)
+        else:
+            options = Options(context={**values, **base})
         result = FrameAggregateFeatureGroup.match_feature_group_criteria("sales__avg_7_day_window", options, None)
         assert result is True
 
-    def test_forwarded_frame_type_mismatch_env_downgrade_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("origin", "placement"),
+        [("forwarded", "group"), ("own", "group"), ("own", "context")],
+    )
+    def test_frame_type_mismatch_env_downgrade_is_accepted(
+        self, origin: str, placement: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
         monkeypatch.setenv("MLODA_ALLOW_FORWARDED_NAME_MISMATCH", "1")
-        consumer = Options(group={"frame_type": "time"})
+        base = {"partition_by": ["region"], "order_by": "timestamp"}
+        if origin == "forwarded":
+            options = Options(context=base)
+            options.inherit_from(Options(group={"frame_type": "time"}))
+        elif placement == "group":
+            options = Options(group={"frame_type": "time"}, context=base)
+        else:
+            options = Options(context={"frame_type": "time", **base})
+        with caplog.at_level(logging.WARNING):
+            result = FrameAggregateFeatureGroup.match_feature_group_criteria("sales__sum_rolling_3", options, None)
+        assert result is True
+        assert any(r.levelno == logging.WARNING and "frame_type" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("wrap", [False, True], ids=["scalar", "singleton_tuple"])
+    @pytest.mark.parametrize("path", ["group", "context"])
+    def test_matching_forwarded_frame_params_is_accepted(self, path: str, wrap: bool) -> None:
+        values: dict[str, Any] = {"frame_type": "time", "frame_size": 7, "frame_unit": "day"}
+        if wrap:
+            values = {k: (v,) for k, v in values.items()}
         options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
-        options.inherit_from(consumer)
-        result = FrameAggregateFeatureGroup.match_feature_group_criteria("sales__sum_rolling_3", options, None)
+        if path == "group":
+            options.inherit_from(Options(group=values))
+        else:
+            options.inherit_from(Options(context=values), inherit_context_keys=frozenset(values))
+        result = FrameAggregateFeatureGroup.match_feature_group_criteria("sales__avg_7_day_window", options, None)
         assert result is True
 
     @pytest.mark.parametrize("feature_name", ["sales__cumsum", "sales__expanding_avg"])

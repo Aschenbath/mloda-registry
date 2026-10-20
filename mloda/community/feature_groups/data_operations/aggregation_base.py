@@ -17,10 +17,18 @@ modules.
 
 from __future__ import annotations
 
+from typing import Any
+
 from mloda.provider import FeatureChainParser, FeatureChainParserMixin, FeatureGroup
 from mloda.user import DataType, Feature, Options
 
-from mloda.community.feature_groups.data_operations.base import KeyColumnInputsMixin, op_token_value
+from mloda.community.feature_groups.data_operations.base import (
+    FRAME_TYPE,
+    KeyColumnInputsMixin,
+    is_own_option,
+    name_matches_prefix,
+    op_token_value,
+)
 from mloda.community.feature_groups.data_operations.capability_hook import SubtypeCapabilityHook
 
 AGGREGATION_TYPES: dict[str, str] = {
@@ -54,6 +62,23 @@ class AggregationFeatureGroupBase(KeyColumnInputsMixin, SubtypeCapabilityHook, F
     #: Aggregation types that produce an integer count. Subclasses override which
     #: agg types declare INT64 via ``return_data_type_rule``.
     _COUNTING_AGG_TYPES: frozenset[str] = frozenset({"count", "nunique"})
+
+    #: Own options that make a config-path feature belong to another family.
+    CONFIG_DECLINE_KEYS: tuple[str, ...] = (FRAME_TYPE,)
+
+    @classmethod
+    def match_feature_group_criteria(
+        cls,
+        feature_name: Any,
+        options: Any,
+        _data_access_collection: Any = None,
+    ) -> bool:
+        """Decline a config-path feature carrying an own option of another family."""
+        if not name_matches_prefix(cls, feature_name) and any(
+            is_own_option(options, k) for k in cls.CONFIG_DECLINE_KEYS
+        ):
+            return False
+        return super().match_feature_group_criteria(feature_name, options, _data_access_collection)
 
     @classmethod
     def _validate_string_match(cls, feature_name: str, operation_config: str, source_feature: str) -> bool:
