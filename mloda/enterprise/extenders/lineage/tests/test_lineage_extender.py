@@ -4,6 +4,7 @@ tests run local feature groups through mloda.run_all; direct __call__ tests use 
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import logging
 import re
@@ -2004,12 +2005,19 @@ class TestLineageFacetsRunFacet:
             assert "None" not in Serde.to_json(event)
             assert "None" not in event.job.name
 
-    def test_schema_url_is_a_stable_https_url_of_the_module(self) -> None:
+    def test_schema_url_names_the_module_at_the_installed_release_tag(self) -> None:
         url = MlodaRunFacet._get_schema()
+        version = importlib.metadata.version("mloda-enterprise")
+        module_path = MlodaRunFacet.__module__.replace(".", "/") + ".py"
+        expected = f"https://github.com/mloda-ai/mloda-registry/blob/{version}/{module_path}"
+        repo_root = Path(__file__).resolve().parents[5]
 
+        assert (repo_root / module_path).is_file()
         assert url.startswith("https://")
         assert "mloda/enterprise/extenders/lineage" in url
         assert url != "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunFacet"
+        assert url == expected
+        assert "/blob/main/" not in url
 
     def test_structure_hash_is_the_sha256_of_the_canonical_structure(self) -> None:
         actual = _structure_hash(
