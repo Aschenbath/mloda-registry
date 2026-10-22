@@ -5132,3 +5132,25 @@ class TestAuditExtenderClassificationRunAll:
         assert [(r["hook"], r["reader_class"]) for r in denies] == (
             [] if allowed else [("INPUT_DATA_MATCH", _qualname(CsvReader))]
         )
+
+    def test_a_masking_step_over_a_public_source_stays_public_for_a_public_principal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _declare_csv_level(monkeypatch, "public")
+        path = write_csv(tmp_path)
+        sink = InMemoryAuditSink()
+
+        with verified_context(tenant_id="t", principal="svc"):
+            results = mloda.run_all(
+                [Feature(_CSV_MASKED, options={_CSV_PATH_OPTION: str(path)})],
+                compute_frameworks=[PyArrowTable],
+                plugin_collector=PluginCollector.enabled_feature_groups({ReadFileFeature, MlodaTestingClassCsvMasked}),
+                function_extender={_classified(sink, "public")},
+                parallelization_modes={ParallelizationMode.SYNC},
+            )
+
+        assert results
+        assert [r for r in sink.records if r["decision"] == "deny"] == []
+        calculates = [r for r in sink.records if r["hook"] == ExtenderHook.FEATURE_GROUP_CALCULATE_FEATURE.name]
+        assert calculates
+        assert {r["classification"] for r in calculates} == {"public"}
