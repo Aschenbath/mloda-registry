@@ -14,12 +14,19 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from mloda.provider import BaseInputData, ComputeFramework, DataCreator, FeatureGroup, FeatureSet, PropertySpec
+from mloda.provider import (
+    ComputeFramework,
+    DataCreator,
+    FeatureGroup,
+    FeatureSet,
+    PropertySpec,
+    SourceFeatureGroup,
+    SourceMatch,
+)
 from mloda.steward import Extender, ExtenderHook
 from mloda.user import DataType, Feature, FeatureName, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
-from mloda_plugins.feature_group.input_data.read_file_feature import ReadFileFeature
-from mloda_plugins.feature_group.input_data.read_files.csv import CsvReader
+from mloda_plugins.feature_group.input_data.file_formats.csv_fg import CsvFG
 from openlineage.client.client import OpenLineageClient
 from openlineage.client.event_v2 import InputDataset, OutputDataset, RunEvent, RunState
 from openlineage.client.facet_v2 import (
@@ -282,15 +289,15 @@ class _CustomProducerLineageExtender(LineageFacetsExtender):
     producer = _CUSTOM_PRODUCER
 
 
-class _DescribingReader(BaseInputData):
-    """Test reader whose describe_columns returns a configurable value, well-formed or not."""
+class _DescribingReader(SourceFeatureGroup):
+    """Abstract test source group whose describe_columns returns a configurable value, well-formed or not."""
 
     described: ClassVar[Any] = {}
     describe_calls: ClassVar[int] = 0
     received_data_access: ClassVar[list[Any]] = []
 
     @classmethod
-    def load_data(cls, data_access: Any, features: FeatureSet) -> Any:
+    def load_neutral(cls, match: SourceMatch, features: Any) -> Any:
         return "loaded"
 
     @classmethod
@@ -309,14 +316,14 @@ def _describing_reader(described: Any) -> type[_DescribingReader]:
     )
 
 
-class _RaisingReader(BaseInputData):
-    """Test reader whose describe_columns always fails; describe_calls counts the attempts."""
+class _RaisingReader(SourceFeatureGroup):
+    """Abstract test source group whose describe_columns always fails; describe_calls counts the attempts."""
 
     exception: ClassVar[type[Exception]] = NotImplementedError
     describe_calls: ClassVar[int] = 0
 
     @classmethod
-    def load_data(cls, data_access: Any, features: FeatureSet) -> Any:
+    def load_neutral(cls, match: SourceMatch, features: Any) -> Any:
         return "loaded"
 
     @classmethod
@@ -457,7 +464,7 @@ def _calculate_loading_step(
     loaded: Sequence[str] = (_LOADED,),
     input_features: frozenset[str] | None = None,
     consumer_options: Options | None = None,
-    reader: type[BaseInputData] | Sequence[type[BaseInputData] | None] | None = None,
+    reader: type[SourceFeatureGroup] | Sequence[type[SourceFeatureGroup] | None] | None = None,
     raw_args: Sequence[Any] | None = None,
 ) -> RunEvent:
     """Run one calculate call directly, firing a load hook per identity in `loaded`, optionally via `reader`
@@ -469,7 +476,9 @@ def _calculate_loading_step(
     for feature in step_features:
         feature.child_options = consumer_options  # before the set is built: the hash includes child_options
     features = FeatureSet(step_features)
-    readers: Sequence[type[BaseInputData] | None] = reader if isinstance(reader, Sequence) else [reader] * len(loaded)
+    readers: Sequence[type[SourceFeatureGroup] | None] = (
+        reader if isinstance(reader, Sequence) else [reader] * len(loaded)
+    )
     raws: Sequence[Any] = raw_args if raw_args is not None else loaded
 
     def load() -> str:
@@ -479,7 +488,7 @@ def _calculate_loading_step(
             )
             with load_context.activate():
                 if one_reader is not None:
-                    assert extender(one_reader.load_data, raw, features) == "loaded"
+                    assert extender(one_reader.load_neutral, raw, features) == "loaded"
                 else:
                     assert extender(lambda *_: "loaded", raw) == "loaded"
         return "data"
@@ -1130,16 +1139,16 @@ class TestLineageFacetsRootSourceColumns:
         client, transport = ol_capture
         path = tmp_path / "data.csv"
         path.write_text("alpha,beta\n1,2\n3,4\n", encoding="utf-8")
-        options = Options(group={CsvReader.__name__: str(path)}, context={_SOURCE_COLUMN: True})
+        options = Options(group={CsvFG.__name__: str(path)}, context={_SOURCE_COLUMN: True})
 
         with caplog.at_level(logging.WARNING):
             _run(
                 LineageFacetsExtender(client=client, dataset_namespace="lineage-ds"),
                 [Feature("alpha", options=options)],
-                ReadFileFeature,
+                CsvFG,
             )
 
-        complete = _complete(transport.events, _job(ReadFileFeature))
+        complete = _complete(transport.events, _job(CsvFG))
         assert _column_lineage(complete, "alpha").fields == {"alpha": _root_edge(str(path), "alpha", namespace="file")}
         assert _module_warnings(caplog) == []
 
@@ -1149,20 +1158,20 @@ class TestLineageFacetsRootSourceColumns:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """CsvReader describes columns via `get_column_names`, so a column absent from the header is caught."""
+        """CsvFG describes columns via `column_names`, so a column absent from the header is caught."""
         client, transport = ol_capture
         path = tmp_path / "data.csv"
         path.write_text("alpha,beta\n1,2\n3,4\n", encoding="utf-8")
-        options = Options(group={CsvReader.__name__: str(path)}, context={_SOURCE_COLUMN: "not_a_column"})
+        options = Options(group={CsvFG.__name__: str(path)}, context={_SOURCE_COLUMN: "not_a_column"})
 
         with caplog.at_level(logging.WARNING):
             _run(
                 LineageFacetsExtender(client=client, dataset_namespace="lineage-ds"),
                 [Feature("alpha", options=options)],
-                ReadFileFeature,
+                CsvFG,
             )
 
-        complete = _complete(transport.events, _job(ReadFileFeature))
+        complete = _complete(transport.events, _job(CsvFG))
         assert not _has_column_lineage(complete, "alpha")
         warnings = _module_warnings(caplog)
         assert len(warnings) == 1
@@ -1257,7 +1266,7 @@ class TestLineageFacetsRootSourceColumns:
         self, ol_capture: tuple[OpenLineageClient, RecordingTransport]
     ) -> None:
         raw = "host=db user=u password=hunter2"
-        context_identity = BaseInputData.data_access_identity(raw)  # "str"
+        context_identity = "SourceMatch"
 
         event = _calculate_loading_step(
             ol_capture, _SourceByDict, {"out": Options()}, loaded=(context_identity,), raw_args=(raw,)
@@ -1335,8 +1344,7 @@ class TestLineageFacetsRootSourceColumns:
     ) -> None:
         raw_one = "host=db user=u password=one"
         raw_two = "Server=x;Uid=u;Pwd=two;"
-        context_identity = BaseInputData.data_access_identity(raw_one)
-        assert context_identity == BaseInputData.data_access_identity(raw_two) == "str"
+        context_identity = "SourceMatch"
 
         event = _calculate_loading_step(
             ol_capture,
@@ -1352,7 +1360,7 @@ class TestLineageFacetsRootSourceColumns:
         self, ol_capture: tuple[OpenLineageClient, RecordingTransport]
     ) -> None:
         raw = "host=db user=u password=hunter2"
-        context_identity = BaseInputData.data_access_identity(raw)  # "str"
+        context_identity = "SourceMatch"
         reader = _describing_reader({"src": None})
 
         event = _calculate_loading_step(
@@ -1523,7 +1531,7 @@ class TestLineageFacetsRootSourceColumns:
                 hook=ExtenderHook.INPUT_DATA_LOAD, data_access_identity=_LOADED, reader_class=reader
             )
             with load_context.activate():
-                assert extender(lambda raw, fs: reader.load_data(raw, fs), _LOADED, features) == "loaded"
+                assert extender(lambda raw, fs: reader.load_neutral(raw, fs), _LOADED, features) == "loaded"
             return "data"
 
         context = make_hook_context(feature_names=("out",), output_schema=(("out", "int64"),))
@@ -1700,7 +1708,7 @@ class TestLineageFacetsRootSourceColumns:
                 hook=ExtenderHook.INPUT_DATA_LOAD, data_access_identity=_LOADED, reader_class=reader
             )
             with load_context.activate():
-                assert extender(reader.load_data, _LOADED, features) == "loaded"
+                assert extender(reader.load_neutral, _LOADED, features) == "loaded"
             raise RuntimeError("boom after load")
 
         context = make_hook_context(feature_names=("out",), output_schema=(("out", "int64"),))
@@ -1728,7 +1736,7 @@ class TestLineageFacetsRootSourceColumns:
                 hook=ExtenderHook.INPUT_DATA_LOAD, data_access_identity="other.csv", reader_class=inner_reader
             )
             with inner_context.activate():
-                assert extender(inner_reader.load_data, "other.csv", FeatureSet()) == "loaded"
+                assert extender(inner_reader.load_neutral, "other.csv", FeatureSet()) == "loaded"
             return "inner"
 
         def outer_load() -> str:
@@ -1738,7 +1746,7 @@ class TestLineageFacetsRootSourceColumns:
                 hook=ExtenderHook.INPUT_DATA_LOAD, data_access_identity=_LOADED, reader_class=outer_reader
             )
             with outer_context.activate():
-                assert extender(outer_reader.load_data, _LOADED, outer_features) == "loaded"
+                assert extender(outer_reader.load_neutral, _LOADED, outer_features) == "loaded"
             return "outer"
 
         context = make_hook_context(

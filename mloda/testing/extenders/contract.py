@@ -18,6 +18,7 @@ from mloda.testing.extenders.runners import (
     CountingExtender,
     expected_value_int,
     failing_feature_group,
+    run_credentialed_uri_feature,
     run_csv_feature,
     run_failing_feature,
     run_value_int,
@@ -130,6 +131,11 @@ class ExtenderContractTestMixin:
         """Content make_extender_with_sink_probe()'s captured sink, or a real worker's marker file,
         must contain. None skips the check (default; override once probe()'s return type is a
         comparable string collection)."""
+        return None
+
+    def make_extender_with_identity_probe(self) -> tuple[Extender, Callable[[], tuple[list[str], str]]] | None:
+        """Return an extender plus a zero-arg callable returning what it recorded for the credentialed-URI
+        source read: its data-access identities, and all emitted output as one text. None (default) opts out."""
         return None
 
     @classmethod
@@ -264,6 +270,18 @@ class ExtenderContractTestMixin:
     def test_contract_run_all_input_data_load_leaves_result_unchanged(self, tmp_path: Path) -> None:
         values = run_csv_feature(tmp_path, self.make_extender())
         assert values == [1, 3], f"extender changed data loaded at INPUT_DATA_LOAD: {values}"
+
+    def test_contract_run_all_credentialed_uri_is_recorded_without_the_credentials(self) -> None:
+        declared = self.make_extender_with_identity_probe()
+        if declared is None:
+            pytest.skip("no identity probe declared")
+        extender, probe = declared
+        from mloda.testing.extenders.uri_source import CREDENTIALED_URI_IDENTITY, URI_SECRET
+
+        run_credentialed_uri_feature(extender)
+        identities, emitted = probe()
+        assert identities == [CREDENTIALED_URI_IDENTITY]
+        assert URI_SECRET not in emitted
 
     def test_contract_run_all_wrapped_failure_propagates_and_runs_once(self) -> None:
         fg = failing_feature_group(f"{self.extender_class().__name__.lower()}_boom_feature")
