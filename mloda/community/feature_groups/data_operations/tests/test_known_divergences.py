@@ -178,20 +178,29 @@ def _assert_leaf_is_live(cls: type, method_name: str, ref: str) -> None:
     Closes the hole where an inherited shared test guards nothing because the
     concrete class declared no per-class config. Limitation: methods taking
     fixtures/params (signature not exactly ``(self)``) cannot run outside pytest,
-    so they fall back to the existence check only.
+    so they fall back to the existence check only. Runs the instance's
+    ``setup_method``/``teardown_method`` around the call, as pytest's xunit hooks would.
     """
     if method_name in cls.__dict__:
         return
     params = list(inspect.signature(getattr(cls, method_name)).parameters)
     if params != ["self"]:
         return
+    instance = cls()
+    setup = getattr(instance, "setup_method", None)
+    teardown = getattr(instance, "teardown_method", None)
     try:
-        getattr(cls(), method_name)()
+        if setup is not None:
+            setup()
+        getattr(instance, method_name)()
     except pytest.skip.Exception as exc:
         raise AssertionError(
             f"{ref}: cited regression test {method_name!r} skips for {cls.__name__} and so does not "
             "guard the divergence (inherited shared test with no per-class config)"
         ) from exc
+    finally:
+        if teardown is not None:
+            teardown()
 
 
 def _resolve_test_ref(ref: str) -> None:
