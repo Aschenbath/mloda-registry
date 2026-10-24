@@ -10,6 +10,7 @@ feature group, then inherit the concrete test methods for free:
 - plugin discovery tests (discoverable + blocked when disabled)
 - pattern matching tests (valid names, invalid names, missing config)
 - an abstract family base is never selected without an implementation
+- operation-group checks live in OperationGroupIntegrationTestMixin (mixins/operation_group_integration.py), opt-in per family
 
 Usage::
 
@@ -32,7 +33,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import pytest
-from mloda.provider import FeatureGroup
+from mloda.provider import FeatureGroup, OperationFeatureGroup
 from mloda.user import Feature, FeatureResolutionError, Options, PluginCollector, mloda
 
 from mloda.testing.data_creator.base import column_selective
@@ -244,6 +245,8 @@ class DataOpsIntegrationTestBase(ABC):
 
     def test_family_base_is_not_selected_without_an_implementation(self) -> None:
         """With only the family base(s) and the source enabled, resolution fails as abstract-only."""
+        if issubclass(self.feature_group_class(), OperationFeatureGroup):
+            pytest.skip("an OperationFeatureGroup is concrete; the rejection test covers a missing framework")
         bases = [
             base
             for base in self.feature_group_class().__mro__[1:]

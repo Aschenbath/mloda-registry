@@ -9,23 +9,25 @@ import pytest
 from mloda.user import Feature, FeatureResolutionError, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
-from mloda.community.feature_groups.data_operations.row_preserving.binning.pyarrow_binning import (
-    PyArrowBinning,
-)
+from mloda.community.feature_groups.data_operations.row_preserving.binning import manifest  # noqa: F401
+from mloda.community.feature_groups.data_operations.row_preserving.binning.base import BinningFeatureGroup
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+    OperationGroupIntegrationTestMixin,
+)
 from mloda.testing.feature_groups.data_operations.row_preserving.binning.binning import (
     EXPECTED_BIN_3,
     EXPECTED_QBIN_3,
 )
 
 
-class TestBinningIntegration(DataOpsIntegrationTestBase):
+class TestBinningIntegration(OperationGroupIntegrationTestMixin, DataOpsIntegrationTestBase):
     """Standard integration tests inherited from the base class."""
 
     @classmethod
     def feature_group_class(cls) -> type:
-        return PyArrowBinning
+        return BinningFeatureGroup
 
     @classmethod
     def data_creator_class(cls) -> type:
@@ -114,7 +116,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_bin_3_and_bin_5_together(self) -> None:
         """Request both bin_3 and bin_5 features in one pipeline run."""
-        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, PyArrowBinning})
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, BinningFeatureGroup})
 
         f_bin3 = Feature("value_int__bin_3", options=Options())
         f_bin5 = Feature("value_int__bin_5", options=Options())
@@ -144,7 +146,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_qbin_3_integration(self) -> None:
         """Request qbin_3 feature through the full pipeline."""
-        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, PyArrowBinning})
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, BinningFeatureGroup})
 
         f_qbin3 = Feature("value_int__qbin_3", options=Options())
 
@@ -169,7 +171,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_bin_and_qbin_together(self) -> None:
         """Request both bin and qbin features in one pipeline run."""
-        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, PyArrowBinning})
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, BinningFeatureGroup})
 
         f_bin3 = Feature("value_int__bin_3", options=Options())
         f_qbin3 = Feature("value_int__qbin_3", options=Options())

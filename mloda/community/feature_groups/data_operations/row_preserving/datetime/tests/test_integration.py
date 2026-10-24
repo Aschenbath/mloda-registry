@@ -16,14 +16,16 @@ import pyarrow as pa
 from mloda.user import Feature, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
-from mloda.community.feature_groups.data_operations.row_preserving.datetime.pyarrow_datetime import (
-    PyArrowDateTimeExtraction,
-)
+from mloda.community.feature_groups.data_operations.row_preserving.datetime import manifest  # noqa: F401
+from mloda.community.feature_groups.data_operations.row_preserving.datetime.base import DateTimeFeatureGroup
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+    OperationGroupIntegrationTestMixin,
+)
 
 
-class TestDateTimeIntegration(DataOpsIntegrationTestBase):
+class TestDateTimeIntegration(OperationGroupIntegrationTestMixin, DataOpsIntegrationTestBase):
     """Standard integration tests inherited from the base class.
 
     Datetime operations use pattern-based matching (``<source>__<op>``),
@@ -34,7 +36,7 @@ class TestDateTimeIntegration(DataOpsIntegrationTestBase):
 
     @classmethod
     def feature_group_class(cls) -> type:
-        return PyArrowDateTimeExtraction
+        return DateTimeFeatureGroup
 
     @classmethod
     def data_creator_class(cls) -> type:
@@ -93,7 +95,7 @@ class TestDateTimeIntegration(DataOpsIntegrationTestBase):
     def test_match_rejects_missing_config(self) -> None:
         """Datetime uses pattern-based matching. A non-pattern name without config should fail."""
         options = Options()
-        assert not PyArrowDateTimeExtraction.match_feature_group_criteria("my_custom_result", options)
+        assert not DateTimeFeatureGroup.match_feature_group_criteria("my_custom_result", options)
 
 
 class TestIntegrationMultipleFeatures:
@@ -101,9 +103,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_year_and_month_together(self) -> None:
         """Request both year and month features in one pipeline run."""
-        plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowDateTimeExtraction}
-        )
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, DateTimeFeatureGroup})
 
         f_year = Feature("timestamp__year", options=Options())
         f_month = Feature("timestamp__month", options=Options())
@@ -135,9 +135,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_dayofweek_and_is_weekend_together(self) -> None:
         """Request dayofweek and is_weekend features in one pipeline run."""
-        plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowDateTimeExtraction}
-        )
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, DateTimeFeatureGroup})
 
         f_dow = Feature("timestamp__dayofweek", options=Options())
         f_weekend = Feature("timestamp__is_weekend", options=Options())

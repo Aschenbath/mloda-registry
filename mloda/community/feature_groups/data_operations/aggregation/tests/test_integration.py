@@ -34,9 +34,14 @@ from mloda.testing.data_creator.pandas import PandasDataOpsTestDataCreator
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
 from mloda.testing.feature_groups.data_operations.mixins.mask_integration import MaskIntegrationTestMixin
+from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+    OperationGroupIntegrationTestMixin,
+)
 
 
-class TestAggregationIntegration(MaskIntegrationTestMixin, DataOpsIntegrationTestBase):
+class TestAggregationIntegration(
+    OperationGroupIntegrationTestMixin, MaskIntegrationTestMixin, DataOpsIntegrationTestBase
+):
     """Standard integration tests inherited from the base class."""
 
     @classmethod
@@ -335,20 +340,6 @@ class TestIntegrationSeveralFrameworks:
         steps = [step for step in plan if step.step_kind == "compute" and step.feature_group is AggregationFeatureGroup]
         assert len(steps) == 1
         return steps[0]
-
-    def test_several_frameworks_enabled_runs_sum(self) -> None:
-        pytest.importorskip("pandas")
-        from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
-
-        results = mloda.run_all(
-            [self._feature()],
-            compute_frameworks=[PyArrowTable, PandasDataFrame],
-            plugin_collector=self._collector(),
-        )
-
-        tables = [t for t in results if isinstance(t, pa.Table) and "value_int__sum_agg" in t.column_names]
-        assert len(tables) == 1
-        assert sorted(tables[0].column("value_int__sum_agg").to_pylist()) == sorted([25, 140, 70, -10])
 
     def test_divergent_pandas_sum_is_served_by_pyarrow(self) -> None:
         """Pandas declares sum divergent (it skips NaN), so data already in Pandas is still aggregated by PyArrow.
