@@ -286,7 +286,7 @@ regression_test:
 <!-- machine-checked
 operation: frame_aggregate
 framework: pandas, polars_lazy, duckdb, sqlite, python_dict
-condition: a mask with source_col == order_by in a time frame cannot be simulated natively
+condition: a mask with source_col == order_by in a time frame is rejected on every backend (conservative, no parity test)
 mitigation_location:
 - mloda/community/feature_groups/data_operations/row_preserving/frame_aggregate/pandas_frame_aggregate.py
 - mloda/community/feature_groups/data_operations/row_preserving/frame_aggregate/polars_lazy_frame_aggregate.py
@@ -299,7 +299,7 @@ regression_test:
 
 - **Operations**: `row_preserving/frame_aggregate` (only the `time` frame type, with `source_col == order_by` and a mask present).
 - **Mitigation kind**: Excluded shape.
-- **How**: The PyArrow reference applies the mask to `source_col` before computing the window. When `source_col == order_by`, mask-write clobbers the order column with null, and the reference's `current_order is None` branch returns just `[self]`. None of the native time-window primitives can simulate this: pandas `rolling(on=ts)` cannot; polars `rolling_*_by` uses the unmasked `order_by` for window bounds even when the masked source is a temp column; the DuckDB and SQLite correlated subqueries wrap only the aggregate expression in `CASE WHEN ... THEN source END`, leaving the bounds operating on the unmasked column. PythonDict builds `order_by` and the masked source as two independently-built Python lists, so it has the same coupling gap even though it is otherwise unconstrained by engine SQL/pandas limitations. Each backend raises a `ValueError` when this combo is detected at runtime instead of silently producing a wrong result. Non-time frames continue to work via a separate temp column (or list) for the masked source.
+- **How**: The PyArrow reference reads `order_by` unmasked and masks only the aggregated values. The native time-window primitives (pandas `rolling(on=ts)`, polars `rolling_*_by`, the DuckDB/SQLite correlated subqueries, PythonDict's separate lists) already bound windows on the unmasked `order_by`, so the rejection is conservative and has no parity test yet. Each backend raises `ValueError` for this shape. Non-time frames are supported and covered by `test_cross_framework_mask_source_equals_order_by`.
 - **Related**: parent #183, implementing #202.
 
 ### Pandas / Polars-lazy native time-rolling rejects null `order_by`
