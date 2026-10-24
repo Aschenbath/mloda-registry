@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import pickle  # nosec
 from typing import Any
 
 import pytest
-from mloda.provider import is_match_abort
+from mloda.provider import FeatureGroup, Implementation, OperationFeatureGroup, is_match_abort
 from mloda.user import DataType, Feature, Options
 
 from mloda.community.feature_groups.data_operations.row_preserving.lookup.base import (
@@ -20,7 +21,12 @@ from mloda.community.feature_groups.data_operations.row_preserving.lookup.base i
     value_family,
 )
 from mloda.community.feature_groups.data_operations.row_preserving.lookup.pyarrow_lookup import PyArrowLookup
-from mloda.testing.feature_groups.data_operations.helpers import extract_column, feature_set_for
+from mloda.testing.feature_groups.data_operations.helpers import (
+    calculate_with,
+    extract_column,
+    feature_set_for,
+    make_feature_set,
+)
 from mloda.testing.feature_groups.data_operations.match_validation import ScalarArityTestBase, TokenCase
 from mloda.testing.feature_groups.data_operations.row_preserving.lookup.lookup import (
     FULL_STR_MAP,
@@ -29,21 +35,21 @@ from mloda.testing.feature_groups.data_operations.row_preserving.lookup.lookup i
     PARTIAL_STR_MAP,
     STR_TO_BOOL_MAP,
     STR_TO_INT_MAP,
+    EmptyMappingHook,
     NutsMappingHook,
     create_lookup_arrow_table,
 )
 
 
-class _HookLookup(NutsMappingHook, PyArrowLookup):
+class _HookLookup(NutsMappingHook, LookupFeatureGroup):
     pass
 
 
-class _BackToOption(_HookLookup):
-    MAPPING_FROM_OPTION = True  # type: ignore[misc]
-    PREFIX_PATTERN = r".*__lookup$"
+class _EmptyMappingHookLookup(EmptyMappingHook, LookupFeatureGroup):
+    pass
 
 
-class _InvalidMappingHookLookup(NutsMappingHook, PyArrowLookup):
+class _InvalidMappingHookLookup(NutsMappingHook, LookupFeatureGroup):
     PREFIX_PATTERN = r".*__badmap$"
 
     @classmethod
@@ -51,7 +57,7 @@ class _InvalidMappingHookLookup(NutsMappingHook, PyArrowLookup):
         return {"a": 1, "b": "x"}
 
 
-class _FailingHookLookup(NutsMappingHook, PyArrowLookup):
+class _FailingHookLookup(NutsMappingHook, LookupFeatureGroup):
     PREFIX_PATTERN = r".*__failing$"
 
     @classmethod
@@ -135,26 +141,26 @@ class TestConstants:
 
 class TestMatchRules:
     def test_name_with_mapping_matches(self) -> None:
-        assert PyArrowLookup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=PARTIAL_STR_MAP))
+        assert LookupFeatureGroup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=PARTIAL_STR_MAP))
 
     def test_name_without_mapping_does_not_match(self) -> None:
-        assert not PyArrowLookup.match_feature_group_criteria("x__lookup", Options())
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__lookup", Options())
 
     def test_config_path_with_mapping_matches(self) -> None:
         options = _opts(in_features="x", lookup_mapping=PARTIAL_STR_MAP)
-        assert PyArrowLookup.match_feature_group_criteria("my_result", options)
+        assert LookupFeatureGroup.match_feature_group_criteria("my_result", options)
 
     def test_config_path_without_mapping_does_not_match(self) -> None:
-        assert not PyArrowLookup.match_feature_group_criteria("my_result", _opts(in_features="x"))
+        assert not LookupFeatureGroup.match_feature_group_criteria("my_result", _opts(in_features="x"))
 
     def test_unrelated_name_does_not_match(self) -> None:
-        assert not PyArrowLookup.match_feature_group_criteria("x__ffill", _opts(lookup_mapping=PARTIAL_STR_MAP))
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__ffill", _opts(lookup_mapping=PARTIAL_STR_MAP))
 
     def test_hook_subclass_does_not_match_generic_name(self) -> None:
         assert not _HookLookup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=PARTIAL_STR_MAP))
 
     def test_generic_does_not_match_hook_name(self) -> None:
-        assert not PyArrowLookup.match_feature_group_criteria("x__nuts2024", _opts(lookup_mapping=PARTIAL_STR_MAP))
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__nuts2024", _opts(lookup_mapping=PARTIAL_STR_MAP))
 
     @pytest.mark.parametrize(
         "mapping",
@@ -167,7 +173,7 @@ class TestMatchRules:
         ],
     )
     def test_valid_mappings_accepted(self, mapping: dict[Any, Any]) -> None:
-        assert PyArrowLookup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=mapping))
+        assert LookupFeatureGroup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=mapping))
 
     @pytest.mark.parametrize(
         "mapping",
@@ -187,12 +193,12 @@ class TestMatchRules:
         ],
     )
     def test_invalid_mappings_rejected(self, mapping: Any) -> None:
-        assert not PyArrowLookup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=mapping))
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=mapping))
 
     @pytest.mark.parametrize("policy", ["raise", "null", "keep"])
     def test_valid_policies_accepted(self, policy: str) -> None:
         options = _opts(lookup_mapping=PARTIAL_STR_MAP, on_unmatched=policy)
-        assert PyArrowLookup.match_feature_group_criteria("x__lookup", options)
+        assert LookupFeatureGroup.match_feature_group_criteria("x__lookup", options)
 
     @pytest.mark.parametrize(
         "policy",
@@ -205,7 +211,7 @@ class TestMatchRules:
     )
     def test_unknown_policy_rejected(self, policy: Any) -> None:
         options = _opts(lookup_mapping=PARTIAL_STR_MAP, on_unmatched=policy)
-        assert not PyArrowLookup.match_feature_group_criteria("x__lookup", options)
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__lookup", options)
 
 
 class TestMatchAbort:
@@ -213,15 +219,15 @@ class TestMatchAbort:
     def test_keep_with_mismatched_families_aborts_match(self, mapping: dict[Any, Any]) -> None:
         options = _opts(lookup_mapping=mapping, on_unmatched="keep")
         with pytest.raises(ValueError, match="keep") as exc_info:
-            PyArrowLookup.match_feature_group_criteria("x__lookup", options)
+            LookupFeatureGroup.match_feature_group_criteria("x__lookup", options)
         assert is_match_abort(exc_info.value)
 
     def test_keep_with_invalid_mapping_declines_quietly(self) -> None:
         options = _opts(lookup_mapping={"a": 1, "b": "x"}, on_unmatched="keep")
-        assert not PyArrowLookup.match_feature_group_criteria("x__lookup", options)
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__lookup", options)
 
     def test_keep_without_mapping_declines_quietly(self) -> None:
-        assert not PyArrowLookup.match_feature_group_criteria("x__lookup", _opts(on_unmatched="keep"))
+        assert not LookupFeatureGroup.match_feature_group_criteria("x__lookup", _opts(on_unmatched="keep"))
 
     @pytest.mark.parametrize("mapping", [PARTIAL_STR_MAP, {"a": 1, "b": "x"}], ids=["valid", "invalid"])
     def test_hook_own_mapping_option_aborts_match(self, mapping: dict[Any, Any]) -> None:
@@ -242,9 +248,22 @@ class TestMatchAbort:
         assert _HookLookup.match_feature_group_criteria("x__lookup__nuts2024", options)
 
     def test_subclass_restoring_mapping_option_regains_guard(self) -> None:
-        invalid = _opts(lookup_mapping={"a": 1, "b": "x"}, on_unmatched="keep")
-        assert not _BackToOption.match_feature_group_criteria("x__lookup", invalid)
-        assert _BackToOption.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=PARTIAL_STR_MAP))
+        import gc
+
+        from mloda.provider import get_all_subclasses
+
+        class _BackToOption(_HookLookup):
+            MAPPING_FROM_OPTION = True  # type: ignore[misc]
+            PREFIX_PATTERN = r".*__lookup$"
+
+        try:
+            invalid = _opts(lookup_mapping={"a": 1, "b": "x"}, on_unmatched="keep")
+            assert not _BackToOption.match_feature_group_criteria("x__lookup", invalid)
+            assert _BackToOption.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=PARTIAL_STR_MAP))
+        finally:
+            del _BackToOption
+            gc.collect()
+        assert not [c for c in get_all_subclasses(FeatureGroup) if c.__name__ == "_BackToOption"]
 
     def test_hook_config_path_with_mapping_declines(self) -> None:
         options = _opts(in_features="x", lookup_mapping=PARTIAL_STR_MAP)
@@ -254,14 +273,14 @@ class TestMatchAbort:
 class TestRejectionReason:
     def test_invalid_mapping_reason_names_option_without_echoing_mapping(self) -> None:
         big = {f"key{i}": "x" for i in range(200)} | {"bad": 1}
-        reason = PyArrowLookup._strict_validation_rejection_reason("x__lookup", _opts(lookup_mapping=big))
+        reason = LookupFeatureGroup._strict_validation_rejection_reason("x__lookup", _opts(lookup_mapping=big))
         assert reason is not None
         assert "'lookup_mapping'" in reason
         assert "key150" not in reason
 
     def test_unknown_policy_reason_names_option(self) -> None:
         options = _opts(lookup_mapping=PARTIAL_STR_MAP, on_unmatched="drop")
-        reason = PyArrowLookup._strict_validation_rejection_reason("x__lookup", options)
+        reason = LookupFeatureGroup._strict_validation_rejection_reason("x__lookup", options)
         assert reason is not None
         assert "'on_unmatched'" in reason
 
@@ -270,7 +289,7 @@ class TestSubclassGuard:
     def test_hook_subclass_keeping_base_pattern_raises_type_error(self) -> None:
         with pytest.raises(TypeError):
 
-            class _KeepsBasePattern(PyArrowLookup):
+            class _KeepsBasePattern(LookupFeatureGroup):
                 MAPPING_FROM_OPTION = False
 
     def test_hook_subclass_with_own_pattern_is_accepted(self) -> None:
@@ -280,13 +299,13 @@ class TestSubclassGuard:
 class TestHooks:
     def test_default_resolve_mapping_unwraps_option(self) -> None:
         feature = Feature("x__lookup", options=_opts(lookup_mapping=PARTIAL_STR_MAP))
-        mapping = PyArrowLookup.resolve_mapping(feature)
+        mapping = LookupFeatureGroup.resolve_mapping(feature)
         assert mapping is not None
         assert dict(mapping) == PARTIAL_STR_MAP
 
     def test_default_reasons_empty(self) -> None:
         feature = Feature("x__lookup", options=_opts(lookup_mapping=PARTIAL_STR_MAP))
-        assert dict(PyArrowLookup.resolve_unmatched_reasons(feature)) == {}
+        assert dict(LookupFeatureGroup.resolve_unmatched_reasons(feature)) == {}
 
     def test_compute_lookup_signature(self) -> None:
         result = PyArrowLookup._compute_lookup(
@@ -314,19 +333,22 @@ class TestReturnDataTypeRule:
     )
     def test_by_value_family(self, mapping: dict[Any, Any], expected: DataType) -> None:
         feature = Feature("x__lookup", options=_opts(lookup_mapping=mapping))
-        assert PyArrowLookup.return_data_type_rule(feature) == expected
+        assert LookupFeatureGroup.return_data_type_rule(feature) == expected
 
     def test_invalid_mapping_returns_none(self) -> None:
         feature = Feature("x__lookup", options=_opts(lookup_mapping={"a": "x", "b": 1}))
-        assert PyArrowLookup.return_data_type_rule(feature) is None
+        assert LookupFeatureGroup.return_data_type_rule(feature) is None
 
     @pytest.mark.parametrize("mapping", _UNSAFE_MAPPINGS)
     def test_unsafe_mapping_returns_none(self, mapping: dict[Any, Any]) -> None:
-        assert PyArrowLookup.return_data_type_rule(Feature("x__lookup", options=_opts(lookup_mapping=mapping))) is None
+        assert (
+            LookupFeatureGroup.return_data_type_rule(Feature("x__lookup", options=_opts(lookup_mapping=mapping)))
+            is None
+        )
 
     def test_int64_bounds_accepted(self) -> None:
         mapping = {-(2**63): 2**63 - 1, 2**63 - 1: -(2**63)}
-        assert PyArrowLookup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=mapping))
+        assert LookupFeatureGroup.match_feature_group_criteria("x__lookup", _opts(lookup_mapping=mapping))
 
     def test_hook_mapping_typed(self) -> None:
         assert _HookLookup.return_data_type_rule(Feature("x__nuts2024", options=Options())) == DataType.STRING
@@ -340,16 +362,42 @@ class TestReturnDataTypeRule:
             _FailingHookLookup.return_data_type_rule(Feature("x__failing", options=Options()))
 
 
+class TestOperationGroupShape:
+    """LookupFeatureGroup is one OperationFeatureGroup served by one Implementation per framework."""
+
+    def test_group_is_a_concrete_operation_group(self) -> None:
+        assert issubclass(LookupFeatureGroup, OperationFeatureGroup)
+        assert not inspect.isabstract(LookupFeatureGroup)
+        assert LookupFeatureGroup.SUBTYPES is None
+
+    def test_group_owns_the_loop_and_no_per_framework_compute(self) -> None:
+        assert callable(LookupFeatureGroup.lookup)
+        assert not hasattr(LookupFeatureGroup, "_compute_lookup")
+
+    def test_group_needs_an_implementation_on_the_feature_set(self) -> None:
+        fs = make_feature_set("product_code__lookup", lookup_mapping=PARTIAL_STR_MAP)
+        with pytest.raises(ValueError, match="no implementation"):
+            LookupFeatureGroup.calculate_feature(create_lookup_arrow_table(), fs)
+
+    def test_manifest_implementations_are_plain_implementations(self) -> None:
+        from mloda.community.feature_groups.data_operations.row_preserving.lookup.manifest import FEATURE_GROUPS
+
+        implementations: list[Any] = [cls for cls in FEATURE_GROUPS if cls is not LookupFeatureGroup]
+        assert implementations
+        for impl in implementations:
+            assert issubclass(impl, Implementation)
+            assert not issubclass(impl, FeatureGroup)
+            assert callable(impl._compute_lookup)
+            assert impl.supported is None
+            assert dict(impl.divergent) == {}
+
+
 class TestOnUnmatchedArity(ScalarArityTestBase):
     """``on_unmatched`` is a scalar key: a multi-element container must not match."""
 
     @classmethod
     def feature_group_class(cls) -> Any:
         return LookupFeatureGroup
-
-    @classmethod
-    def match_class(cls) -> Any:
-        return PyArrowLookup
 
     @classmethod
     def base_context(cls) -> dict[str, Any]:
@@ -365,5 +413,5 @@ class TestOnUnmatchedArity(ScalarArityTestBase):
 
     @classmethod
     def compute_values(cls, options: Options) -> list[Any] | None:
-        result = PyArrowLookup.calculate_feature(create_lookup_arrow_table(), feature_set_for("my_result", options))
+        result = calculate_with(PyArrowLookup, create_lookup_arrow_table(), feature_set_for("my_result", options))
         return extract_column(result, "my_result")
