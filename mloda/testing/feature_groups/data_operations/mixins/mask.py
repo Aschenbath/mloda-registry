@@ -17,7 +17,12 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
-from mloda.testing.feature_groups.data_operations.helpers import calculate_with, is_null, make_feature_set
+from mloda.testing.feature_groups.data_operations.helpers import (
+    calculate_with,
+    is_null,
+    make_feature_set,
+    make_multi_feature_set,
+)
 
 
 class MaskTestMixin:
@@ -50,6 +55,11 @@ class MaskTestMixin:
     @classmethod
     def mask_order_by(cls) -> str | None:
         """Order key for mask tests. Only frame aggregate needs this."""
+        return None
+
+    @classmethod
+    def mask_companion_feature_name(cls) -> str | None:
+        """A second feature on the same source as ``mask_feature_name``; None skips the multi-feature test."""
         return None
 
     @classmethod
@@ -209,6 +219,66 @@ class MaskTestMixin:
         result = calculate_with(self.implementation_class(), self.test_data, fs)  # type: ignore[attr-defined]
         assert self.get_row_count(result) == self.mask_expected_row_count()  # type: ignore[attr-defined]
         self._assert_mask_values(result, self.mask_no_mask_expected())
+
+    def test_mixin_mask_preserves_input_columns(self) -> None:
+        """Mixin: masking leaves the source column and a user column named like the mask helper unchanged."""
+        if self.mask_is_reducing():
+            pytest.skip("reducing ops do not return input columns")
+        helper_name = "__mloda_masked_src__"
+        n = self._arrow_table.num_rows  # type: ignore[attr-defined]
+        table = self._arrow_table.append_column(  # type: ignore[attr-defined]
+            helper_name, pa.array([1000 + i for i in range(n)], type=pa.int64())
+        )
+        data = self.create_test_data(table)  # type: ignore[attr-defined]
+        source_name = self.mask_feature_name().split("__")[0]
+        fs = make_feature_set(
+            self.mask_feature_name(),
+            self.mask_partition_by(),
+            self.mask_order_by(),
+            mask=("category", "equal", "X"),
+        )
+        result = calculate_with(self.implementation_class(), data, fs)  # type: ignore[attr-defined]
+        assert self.get_row_count(result) == n  # type: ignore[attr-defined]
+        for name in (source_name, helper_name):
+            expected = self.extract_column(data, name)  # type: ignore[attr-defined]
+            actual = self.extract_column(result, name)  # type: ignore[attr-defined]
+            for i, (a, e) in enumerate(zip(actual, expected)):
+                if is_null(e):
+                    assert is_null(a), f"{name} row {i}: expected null, got {a}"
+                else:
+                    assert a == e, f"{name} row {i}: {a} != {e}"
+
+    def test_mixin_mask_multi_feature_set_matches_single_runs(self) -> None:
+        """Mixin: a masked and an unmasked feature on one source in one FeatureSet equal their solo results."""
+        companion = self.mask_companion_feature_name()
+        if self.mask_is_reducing() or companion is None:
+            pytest.skip("needs a row-preserving op with a companion feature")
+        masked = self.mask_feature_name()
+        context: dict[str, Any] = {}
+        if self.mask_partition_by() is not None:
+            context["partition_by"] = self.mask_partition_by()
+        if self.mask_order_by() is not None:
+            context["order_by"] = self.mask_order_by()
+        masked_context = {**context, "mask": ("category", "equal", "X")}
+        impl = self.implementation_class()  # type: ignore[attr-defined]
+
+        data = self.test_data  # type: ignore[attr-defined]
+        both = calculate_with(impl, data, make_multi_feature_set([(masked, masked_context), (companion, context)]))
+        solo_masked = calculate_with(impl, data, make_multi_feature_set([(masked, masked_context)]))
+        solo_plain = calculate_with(impl, data, make_multi_feature_set([(companion, context)]))
+
+        def values(result: Any, name: str) -> list[Any]:
+            # Row order is unspecified on some backends, so compare the sorted multiset of values.
+            return sorted((None if is_null(v) else v for v in self.extract_column(result, name)), key=repr)  # type: ignore[attr-defined]
+
+        for name, solo in ((masked, solo_masked), (companion, solo_plain)):
+            actual, expected = values(both, name), values(solo, name)
+            assert len(actual) == len(expected)
+            for a, e in zip(actual, expected):
+                if self.mask_use_approx() and isinstance(e, float):
+                    assert a == pytest.approx(e, rel=1e-3), f"{name}: {a} != {e}"
+                else:
+                    assert a == e, f"{name}: {a} != {e}"
 
     @pytest.mark.parametrize(
         "metric_values, control_values, mask_spec, control_mask_spec",

@@ -21,11 +21,12 @@ production feature group is not imported to generate its own oracle.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pyarrow as pa
 import pytest
-from mloda.user import Feature, Options, PluginCollector, mloda
+from mloda.user import DataType, Feature, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
 from mloda.community.feature_groups.data_operations.row_changing.resample.base import (
@@ -116,6 +117,57 @@ class TestResampleIntegration:
 
         table = next(t for t in results if isinstance(t, pa.Table) and name in t.column_names)
         assert _sort_none_last(table.column(name).to_pylist()) == _MEAN_SORTED
+
+
+class TestResampleSplitFeatureSets:
+    """Features of one request that split into several FeatureSets."""
+
+    _CONTEXT = {"time_column": "timestamp", "partition_by": ["region"]}
+    _MEAN = "value_float__resample_1_day_mean"
+    _COUNT = "value_float__resample_1_day_count"
+
+    def _run(self, features: list[Feature]) -> list[Any]:
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, ResampleFeatureGroup})
+        return mloda.run_all(features, compute_frameworks=[PyArrowTable], plugin_collector=plugin_collector)
+
+    @pytest.mark.parametrize("order", ["mean_first", "count_first"])
+    @pytest.mark.parametrize("count_source", ["value_float", "timestamp"])
+    def test_split_by_data_type_error_names_group_remedy(self, count_source: str, order: str) -> None:
+        """The error is raised even when the later step's source and keys survive the earlier reduction."""
+        mean = Feature(self._MEAN, options=Options(context=self._CONTEXT), data_type=DataType.DOUBLE)
+        count = Feature(
+            f"{count_source}__resample_1_day_count", options=Options(context=self._CONTEXT), data_type=DataType.INT64
+        )
+        features = [mean, count] if order == "mean_first" else [count, mean]
+        with pytest.raises(ValueError, match=re.escape("Options(group=")):
+            self._run(features)
+
+    def test_chained_resample_runs_without_group_error(self) -> None:
+        """A chained name whose input is an output of the same group is one FeatureSet and must not raise."""
+        name = "value_float__resample_1_day_sum__resample_2_day_max"
+        options = Options(context=self._CONTEXT, cascade_context_keys=frozenset(self._CONTEXT))
+        results = self._run([Feature(name, options=options)])
+        assert any(isinstance(t, pa.Table) and name in t.column_names for t in results)
+
+    def test_split_with_distinct_groups_work(self) -> None:
+        features = [
+            Feature(
+                self._MEAN,
+                options=Options(group={"g": "mean"}, context=self._CONTEXT),
+                data_type=DataType.DOUBLE,
+            ),
+            Feature(
+                self._COUNT,
+                options=Options(group={"g": "count"}, context=self._CONTEXT),
+                data_type=DataType.INT64,
+            ),
+        ]
+        results = self._run(features)
+
+        mean_table = next(t for t in results if isinstance(t, pa.Table) and self._MEAN in t.column_names)
+        count_table = next(t for t in results if isinstance(t, pa.Table) and self._COUNT in t.column_names)
+        assert _sort_none_last(mean_table.column(self._MEAN).to_pylist()) == _MEAN_SORTED
+        assert sorted(count_table.column(self._COUNT).to_pylist()) == _COUNT_SORTED
 
 
 class TestChainedNameDropsContext:
