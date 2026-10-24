@@ -114,9 +114,18 @@ For SQLite, all timestamps are stored as TEXT in ISO 8601. The bucketization SQL
 ## Usage
 
 ```python
+from datetime import datetime, timezone
+
 from mloda.user import Feature, PluginLoader, mloda
 
 PluginLoader.all()
+
+data = {
+    "event_time": [
+        datetime(2023, 1, 1, 14, 37, tzinfo=timezone.utc),
+        datetime(2023, 1, 2, 9, 5, tzinfo=timezone.utc),
+    ]
+}
 
 features = [
     Feature("event_time__floor_1_hour"),  # bucket events per hour
@@ -125,7 +134,7 @@ features = [
     Feature("event_time__round_5_minute"),  # nearest 5-minute boundary, half-up
 ]
 
-result = mloda.run_all(features, compute_frameworks=["PyArrowTable"])
+result = mloda.run_all(features, compute_frameworks=["PyArrowTable"], api_data={"Src": data})
 ```
 
 Row count matches the input; each new column has the same timestamp type (resolution and tz) as the source.

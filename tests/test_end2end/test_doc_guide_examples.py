@@ -14,7 +14,8 @@ small, named, importable helpers so the regression tests below can feed the two 
 variants through the exact same validation logic used against the real guide, instead of
 re-implementing the check inline.
 
-It also runs the python blocks of the allowlisted docs in ``RUNNABLE_DOCS`` in one fresh interpreter.
+It also runs every discovered doc's python blocks in its own interpreter and calls its ``test_*`` functions,
+except the docs in ``SKIPPED_DOCS``.
 """
 
 from __future__ import annotations
@@ -207,9 +208,11 @@ def test_missing_partition_by_regression_is_rejected() -> None:
     assert "AggregationFeatureGroup" in problems[0]
 
 
-def _python_fences(heading: str, guide: Path = BACKEND_FAMILIES_GUIDE) -> list[str]:
+def _python_fences(
+    heading: str, guide: Path = BACKEND_FAMILIES_GUIDE, tags: tuple[str, ...] = ("python",)
+) -> list[str]:
     section = _section(guide.read_text(encoding="utf-8"), heading, ("\n## ",))
-    return [m.group(2) for m in _FENCE_RE.finditer(section) if m.group(1) == "python"]
+    return [m.group(2) for m in _FENCE_RE.finditer(section) if m.group(1) in tags]
 
 
 @lru_cache(maxsize=None)
@@ -473,7 +476,8 @@ def _parametrized_calls(fn: Any) -> list[dict[str, Any]]:
 
 
 def test_conformance_section_test_passes_against_the_operation_group_example() -> None:
-    fences = _python_fences(CONFORMANCE_HEADING, TESTING_GUIDE)
+    # The block is a py fence: it needs guide 09's classes, so the per-doc runner cannot run it alone.
+    fences = _python_fences(CONFORMANCE_HEADING, TESTING_GUIDE, tags=("python", "py"))
     assert fences, "the Conformance section of the testing guide no longer has a python block"
     tests = _exec_section_tests(
         fences[0],
@@ -489,39 +493,90 @@ def test_conformance_section_test_passes_against_the_operation_group_example() -
     assert calls > 0, "the Conformance section test was never called"
 
 
-# Each entry must also pass on its own and on every supported Python: they share one interpreter, in order.
-RUNNABLE_DOCS = (
-    "README.md",
-    "docs/guides/02-discover-plugins.md",
-    "docs/guides/compute-framework-patterns/01-stateless-eager.md",
-    "docs/guides/compute-framework-patterns/07-filter-engine.md",
-    "docs/guides/compute-framework-patterns/08-framework-transformer.md",
-    "docs/guides/data-operation-patterns/07-percentile-rank-offset.md",
-    "docs/guides/data-operation-patterns/08-scalar-and-frame-aggregate.md",
-    "docs/guides/data-operation-patterns/framework-support-matrix.md",
-    "docs/guides/feature-group-patterns/01-root-features.md",
-    "docs/guides/feature-group-patterns/02-derived-features.md",
-    "docs/guides/feature-group-patterns/03-chained-features.md",
-    "docs/guides/feature-group-patterns/04-multi-input-features.md",
-    "docs/guides/feature-group-patterns/05-multi-output-features.md",
-    "docs/guides/feature-group-patterns/06-artifact-features.md",
-    "docs/guides/feature-group-patterns/09-framework-specific.md",
-    "docs/guides/feature-group-patterns/11-options.md",
-    "docs/guides/feature-group-patterns/18-datatypes.md",
-    "docs/guides/feature-group-patterns/19-domain.md",
-    "docs/guides/feature-group-patterns/26-input-feature-forwarding.md",
-)
+_DOC_GLOBS = ("*.md", "docs/**/*.md", "mloda/**/*.md")
+
+
+def _has_python_fence(text: str) -> bool:
+    return any(m.group(1) == "python" for m in _FENCE_RE.finditer(text))
+
+
+def _discover_docs() -> list[str]:
+    found = {path for pattern in _DOC_GLOBS for path in REPO_ROOT.glob(pattern) if path.is_file()}
+    return sorted(
+        path.relative_to(REPO_ROOT).as_posix() for path in found if _has_python_fence(path.read_text(encoding="utf-8"))
+    )
+
+
+DISCOVERED_DOCS = _discover_docs()
+
+# Each doc runs in its own interpreter and must also pass on every supported Python.
+SKIPPED_DOCS: dict[str, str] = {
+    "docs/guides/feature-group-patterns/29-binary-backed-features.md": (
+        "needs a master.key; run by tests/test_end2end/test_binary_backed_features_guide.py"
+    ),
+    "docs/guides/12-export-telemetry.md": "needs the OpenTelemetry OTLP exporter, which is not a dependency",
+    "mloda/enterprise/README.md": (
+        "needs the PII key environment variable; run up to the license check by "
+        "test_enterprise_readme_quick_start_runs_up_to_the_license_or_wheel_check in "
+        "tests/test_end2end/test_binary_backed_features_guide.py"
+    ),
+}
+
+_MARKER_PREFIX = "@@mloda-doc-runner-7f3a@@ "
+
+
+def _marker_line(kind: str, text: str) -> str:
+    return f"{_MARKER_PREFIX}{kind} {text}"
+
 
 _DOC_CHECK_DRIVER = """\
+import inspect
 import sys
 from pathlib import Path
+import mktestdocs
 from mloda.user import PluginLoader
-from mktestdocs import check_md_file
+
+_MARKER_PREFIX = "@@mloda-doc-runner-7f3a@@ "
+
+
+def _marker_line(kind, text):
+    return f"{_MARKER_PREFIX}{kind} {text}"
+
+
+def _run_python(source):
+    namespace = {"__name__": "__main__"}
+    exec(source, namespace)
+    tests = []
+    for name, obj in namespace.items():
+        if getattr(obj, "__module__", None) != "__main__":
+            continue
+        if isinstance(obj, type) and name.startswith("Test"):
+            if any(m.startswith("test_") for m in dir(obj)):
+                _reject(f"{name} is a test class the doc runner cannot call; use test_* functions")
+        elif name.startswith("test_") and callable(obj):
+            if inspect.iscoroutinefunction(obj) or inspect.isasyncgenfunction(obj) or inspect.isgeneratorfunction(obj):
+                _reject(f"{name} is async or a generator, so the doc runner cannot call it")
+            params = inspect.signature(obj).parameters.values()
+            if any(p.default is p.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params):
+                _reject(f"{name} needs arguments, so the doc runner cannot call it")
+            tests.append((name, obj))
+    for name, func in tests:
+        print(_marker_line("CALLING", name), flush=True)
+        func()
+
+
+def _reject(message):
+    print(_marker_line("REJECTED", message), flush=True)
+    sys.exit(1)
+
+
+mktestdocs.register_executor("python", _run_python)
 PluginLoader.all()
 for path in sys.argv[1:]:
-    print(f"CHECKING {path}", flush=True)
-    check_md_file(fpath=Path(path), memory=True)
-"""
+    print(_marker_line("CHECKING", path), flush=True)
+    mktestdocs.check_md_file(fpath=Path(path), memory=True)
+print(_marker_line("DONE", ""), flush=True)
+""".replace("__MARKER_PREFIX__", repr(_MARKER_PREFIX))
 
 
 def _display_path(path: str) -> str:
@@ -530,33 +585,76 @@ def _display_path(path: str) -> str:
     return path
 
 
-def _last_checked(stdout: str | bytes | None) -> str:
+def _parse_stdout(stdout: str | bytes | None) -> tuple[str, str, str, bool]:
+    """Return the last marker kind and text, the last checked file (display form) and whether the run finished."""
     if isinstance(stdout, bytes):
         stdout = stdout.decode(errors="replace")
-    lines = [line for line in (stdout or "").splitlines() if line.startswith("CHECKING ")]
-    return _display_path(lines[-1].removeprefix("CHECKING ")) if lines else "<before the first file>"
+    kind, text, checked, done = "CHECKING", "", "<before the first file>", False
+    for line in (stdout or "").splitlines():
+        if not line.startswith(_MARKER_PREFIX):
+            continue
+        kind, _, text = line.removeprefix(_MARKER_PREFIX).partition(" ")
+        if kind == "CHECKING":
+            checked = _display_path(text)
+        elif kind == "DONE":
+            done = True
+    return kind, text, checked, done
 
 
 def run_md_files_isolated(paths: Sequence[Path], cwd: Path) -> None:
-    """Run the python blocks of *paths* in one fresh interpreter; fail with a message starting with the failing file."""
+    """Run the python blocks of *paths* in one fresh interpreter and call their test_* functions."""
     cmd = [sys.executable, "-c", _DOC_CHECK_DRIVER, *map(str, paths)]
     try:
         result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=300)  # nosec
     except subprocess.TimeoutExpired as exc:
-        raise AssertionError(f"{_last_checked(exc.stdout)}: timed out after {exc.timeout}s") from exc
-    if result.returncode != 0:
-        tail = "\n".join(result.stdout.splitlines()[-50:])
-        raise AssertionError(
-            f"{_last_checked(result.stdout)}: python block failed\nstdout (tail):\n{tail}\nstderr:\n{result.stderr}"
-        )
+        kind, text, where, _ = _parse_stdout(exc.stdout)
+        who = f"{text} " if kind == "CALLING" else ""
+        raise AssertionError(f"{where}: {who}timed out after {exc.timeout}s") from exc
+    kind, text, where, done = _parse_stdout(result.stdout)
+    if result.returncode == 0:
+        if done:
+            return
+        head = f"{where}: exited before the doc runner finished"
+    elif kind == "REJECTED":
+        head = f"{where}: {text}"
+    elif kind == "CALLING":
+        head = f"{where}: {text} failed"
+    else:
+        head = f"{where}: python block failed"
+    tail = "\n".join(result.stdout.splitlines()[-50:])
+    raise AssertionError(f"{head}\nstdout (tail):\n{tail}\nstderr:\n{result.stderr}")
 
 
-def test_runnable_docs_execute(tmp_path: Path) -> None:
-    for doc in RUNNABLE_DOCS:
-        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
-        has_python = any(m.group(1) == "python" for m in _FENCE_RE.finditer(text))
-        assert has_python, f"{doc} has no ```python fence, so it would be checked for nothing"
-    run_md_files_isolated([REPO_ROOT / doc for doc in RUNNABLE_DOCS], cwd=tmp_path)
+def _doc_params() -> list[Any]:
+    return [
+        pytest.param(doc, id=doc, marks=pytest.mark.xfail(reason=SKIPPED_DOCS[doc], strict=True))
+        if doc in SKIPPED_DOCS
+        else pytest.param(doc, id=doc)
+        for doc in DISCOVERED_DOCS
+    ]
+
+
+@pytest.mark.parametrize("doc", _doc_params())
+def test_doc_python_blocks_execute(doc: str, tmp_path: Path) -> None:
+    run_md_files_isolated([REPO_ROOT / doc], cwd=tmp_path)
+
+
+def test_skipped_docs_are_discovered_docs_with_reasons() -> None:
+    assert set(SKIPPED_DOCS) <= set(DISCOVERED_DOCS), sorted(set(SKIPPED_DOCS) - set(DISCOVERED_DOCS))
+    assert all(reason.strip() for reason in SKIPPED_DOCS.values())
+
+
+_FIXED_TMP = "/tmp/"  # nosec B108
+
+
+def test_doc_python_blocks_do_not_write_to_fixed_tmp_paths() -> None:
+    offenders = [
+        doc
+        for doc in DISCOVERED_DOCS
+        for m in _FENCE_RE.finditer((REPO_ROOT / doc).read_text(encoding="utf-8"))
+        if m.group(1) in ("python", "py") and _FIXED_TMP in m.group(2)
+    ]
+    assert offenders == [], f"use a temp directory instead of a /tmp/ literal in: {sorted(set(offenders))}"
 
 
 def test_failing_python_block_names_the_file(tmp_path: Path) -> None:
@@ -572,3 +670,81 @@ def test_failing_python_block_names_the_file(tmp_path: Path) -> None:
     assert message.startswith(str(bad)), message
     assert "boom" in message
     assert "not run" not in message
+
+
+def test_doc_test_functions_are_called(tmp_path: Path) -> None:
+    doc = tmp_path / "broken_test.md"
+    doc.write_text(
+        "```python\ndef test_ok():\n    assert True\n\ndef test_broken():\n    raise RuntimeError('boom')\n```\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError) as excinfo:
+        run_md_files_isolated([doc], cwd=tmp_path)
+    message = str(excinfo.value)
+    assert message.startswith(f"{doc}: test_broken failed"), message
+    assert "boom" in message
+
+
+def test_imported_test_functions_are_not_called(tmp_path: Path) -> None:
+    (tmp_path / "helper.py").write_text("def test_imported():\n    raise RuntimeError('imported')\n", encoding="utf-8")
+    doc = tmp_path / "imports_test.md"
+    doc.write_text(
+        "```python\nimport sys\nsys.path.insert(0, '.')\nfrom helper import test_imported\n```\n",
+        encoding="utf-8",
+    )
+    run_md_files_isolated([doc], cwd=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("def test_needs_arg(x):\n    pass\n", "test_needs_arg"),
+        ("class TestThing:\n    def test_method(self):\n        pass\n", "TestThing"),
+        (
+            "class Base:\n    def test_method(self):\n        pass\n\nclass TestFromMixin(Base):\n    pass\n",
+            "TestFromMixin",
+        ),
+        ("async def test_async():\n    pass\n", "test_async"),
+        ("def test_gen():\n    yield\n", "test_gen"),
+    ],
+)
+def test_uncallable_doc_tests_fail_loudly(tmp_path: Path, source: str, name: str) -> None:
+    doc = tmp_path / "uncallable.md"
+    doc.write_text(f"```python\n{source}```\n", encoding="utf-8")
+    with pytest.raises(AssertionError) as excinfo:
+        run_md_files_isolated([doc], cwd=tmp_path)
+    message = str(excinfo.value)
+    assert message.startswith(f"{doc}: "), message
+    assert name in message.splitlines()[0], message
+
+
+def test_doc_output_cannot_fake_a_marker(tmp_path: Path) -> None:
+    doc = tmp_path / "fake_marker.md"
+    doc.write_text('```python\nprint("CALLING not_me")\nraise RuntimeError("boom")\n```\n', encoding="utf-8")
+    with pytest.raises(AssertionError) as excinfo:
+        run_md_files_isolated([doc], cwd=tmp_path)
+    message = str(excinfo.value)
+    assert message.startswith(f"{doc}: python block failed"), message
+    assert "not_me" not in message.splitlines()[0], message
+
+
+def test_doc_cannot_pass_by_exiting_early(tmp_path: Path) -> None:
+    doc = tmp_path / "early_exit.md"
+    doc.write_text(
+        '```python\nimport sys\ndef test_never():\n    raise RuntimeError("x")\nsys.exit(0)\n```\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError) as excinfo:
+        run_md_files_isolated([doc], cwd=tmp_path)
+    assert str(excinfo.value).startswith(f"{doc}: "), str(excinfo.value)
+
+
+def test_timeout_in_a_doc_test_names_the_function(tmp_path: Path) -> None:
+    doc = tmp_path / "slow.md"
+    doc.write_text("```python\ndef test_slow():\n    pass\n```\n", encoding="utf-8")
+    output = _marker_line("CHECKING", str(doc)) + "\n" + _marker_line("CALLING", "test_slow") + "\n"
+    expired = subprocess.TimeoutExpired(cmd="x", timeout=300, output=output)
+    with patch("tests.test_end2end.test_doc_guide_examples.subprocess.run", side_effect=expired):
+        with pytest.raises(AssertionError) as excinfo:
+            run_md_files_isolated([doc], cwd=tmp_path)
+    assert str(excinfo.value).startswith(f"{doc}: test_slow timed out"), str(excinfo.value)

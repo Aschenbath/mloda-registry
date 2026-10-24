@@ -66,9 +66,17 @@ A null or NaN row never passes a comparison (`equal` with a non-missing value, `
 Pass a `mask` key in the feature's context options:
 
 ```python
-from mloda.user import Feature, Options, mloda, PluginLoader
+from mloda.community.feature_groups.data_operations.aggregation.base import AggregationFeatureGroup
+from mloda.provider import ApiInputDataFeature
+from mloda.user import Feature, Options, PluginCollector, PluginLoader, mloda
 
 PluginLoader.all()
+
+data = {
+    "region": ["A", "A", "B", "B"],
+    "category": ["X", "Y", "X", "X"],
+    "value_int": [10, 5, 20, 30],
+}
 
 # Sum of value_int where category equals 'X', partitioned by region
 feature = Feature(
@@ -84,7 +92,11 @@ feature = Feature(
 result = mloda.run_all(
     [feature],
     compute_frameworks=["PandasDataFrame"],
+    api_data={"MaskData": data},
+    plugin_collector=PluginCollector.enabled_feature_groups({AggregationFeatureGroup, ApiInputDataFeature}),
 )
+# Region A: the Y row is masked (5), leaving 10. Region B: 20 + 30 = 50.
+assert sorted(result[0]["value_int__sum_agg"]) == [10, 50]
 ```
 
 Rows where `category != 'X'` have their `value_int` set to null before the SUM aggregation. The aggregation skips nulls, so the result contains only the sum of values matching the condition.
@@ -192,14 +204,14 @@ class MyAggregationTestBase(MaskTestMixin, DataOpsTestBase):
 
 Concrete test classes then compose the test base with a framework mixin:
 
-```python
+```py
 from mloda.testing.feature_groups.data_operations.mixins.pandas import PandasTestMixin
 
 
 class TestPandasMyAggregation(PandasTestMixin, MyAggregationTestBase):
     @classmethod
     def implementation_class(cls):
-        return PandasMyAggregation
+        return PandasMyAggregation  # an Implementation of the aggregation group
 ```
 
 This pattern ensures mask behavior is verified across all supported frameworks with consistent expected values.

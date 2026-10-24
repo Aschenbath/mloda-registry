@@ -27,13 +27,15 @@ from mloda.user import Feature, Options, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {"product_code": ["A100", "B200", "C300"]}
+
 features = [
     Feature(
         "product_code__lookup",
         Options(context={"lookup_mapping": {"A100": "tools", "B200": "toys"}, "on_unmatched": "null"}),
     ),
 ]
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 ---
@@ -82,7 +84,7 @@ Use the hook instead of the option for large or external tables.
 | `resolve_mapping(feature)` | Returns the mapping. Validated with the same rules as the option. |
 | `resolve_unmatched_reasons(feature)` | Optional. Returns `{key: reason}` for the error message. |
 
-```python
+```py
 class NutsMapping:
     MAPPING_FROM_OPTION = False
     PREFIX_PATTERN = r".*__nuts2024$"

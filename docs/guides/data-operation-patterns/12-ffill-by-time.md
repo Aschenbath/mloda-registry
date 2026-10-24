@@ -27,10 +27,12 @@ from mloda.user import Feature, Options, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {"ts": [1, 2, 3, 4], "symbol": ["A", "A", "B", "B"], "price": [1.0, None, None, 2.0]}
+
 features = [
     Feature("price__ffill", Options(context={"order_by": "ts", "partition_by": ["symbol"]})),
 ]
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 ---

@@ -70,14 +70,21 @@ The gap-diff plus cumulative-sum is expressible natively on every backend, so no
 ## Usage
 
 ```python
+from datetime import datetime
+
 from mloda.user import Feature, Options, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {
+    "ts": [datetime(2023, 1, 1, 10, 0), datetime(2023, 1, 1, 10, 10), datetime(2023, 1, 1, 12, 0)],
+    "user_id": [1, 1, 1],
+}
+
 features = [
     Feature("ts__sessionize_30_minute", Options(context={"partition_by": ["user_id"]})),
 ]
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 ---

@@ -39,16 +39,16 @@ class CustomerScoring(FeatureGroup):
 
     @classmethod
     def calculate_feature(cls, data, features):
-        return {"customer_score": 100}
+        return {"CustomerScoring": [100]}
 ```
 
 ## Step 3: Use Your Plugin
 
 ### Option A: Direct Import
 
-```python
+```py
 from mloda.user import mloda, Feature
-from my_features.scoring import CustomerScoring
+from my_features.scoring.customer import CustomerScoring
 
 result = mloda.run_all([Feature("CustomerScoring")])
 ```

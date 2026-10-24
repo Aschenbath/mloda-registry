@@ -36,13 +36,15 @@ from mloda.user import Feature, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {"name": ["ann", "Bob", None], "description": ["  hi ", "there", "x"]}
+
 features = [
     Feature("name__upper"),
     Feature("description__trim"),
     Feature("name__length"),
 ]
 
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 No `Options` needed. The feature name alone is enough.
@@ -67,7 +69,7 @@ All five operations propagate NULL. A NULL input produces a NULL output; they ne
 
 SQLite refuses to match `upper`, `lower`, and `reverse` at resolution time. `UPPER`/`LOWER` are ASCII-only in SQLite and would diverge from the PyArrow reference on non-ASCII input; `REVERSE` has no native function. Rather than silently producing divergent results or emulating in SQL, the SQLite feature group excludes all three:
 
-```python
+```py
 # mloda/community/feature_groups/data_operations/string/sqlite_string.py
 _SQLITE_STRING_EXPRS: dict[str, str] = {
     "trim": "TRIM({col})",
@@ -82,7 +84,7 @@ def _validate_string_match(cls, feature_name, operation_config, source_feature) 
 
 The SQLite test class mirrors the restriction:
 
-```python
+```py
 class TestSqliteStringOps(SqliteTestMixin, StringTestBase):
     @classmethod
     def supported_ops(cls) -> set[str]:

@@ -70,13 +70,18 @@ from mloda.user import Feature, Options, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {"region": ["A", "A", "B"], "value_int": [10, 20, 30], "name": ["ann", "bob", "cy"]}
+
+# Row-preserving operations share one run.
 features = [
-    Feature("value_int__sum_agg", Options(context={"partition_by": ["region"]})),
     Feature("value_int__p95_percentile", Options(context={"partition_by": ["region"]})),
     Feature("name__upper"),
 ]
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+# An aggregation reduces to one row per group, so it runs on its own.
+grouped = [Feature("value_int__sum_agg", Options(context={"partition_by": ["region"]}))]
+grouped_result = mloda.run_all(grouped, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 Each feature name resolves to one of the built-in data-operation feature groups. The `partition_by` option is consumed by the base class; no framework-specific code runs in user space.

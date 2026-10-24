@@ -24,6 +24,31 @@ from mloda.user import Link, JoinSpec, Index, Feature, FeatureName, Options
 from mloda.provider import FeatureGroup, FeatureSet
 
 
+# Source groups the joins below refer to; each exposes its join key via index_columns().
+class OrderFeatureGroup(FeatureGroup):
+    @classmethod
+    def index_columns(cls) -> list[Index] | None:
+        return [Index(("order_id",))]
+
+
+class CustomerFeatureGroup(FeatureGroup):
+    @classmethod
+    def index_columns(cls) -> list[Index] | None:
+        return [Index(("customer_id",))]
+
+
+class EventFeatureGroup(FeatureGroup):
+    @classmethod
+    def index_columns(cls) -> list[Index] | None:
+        return [Index(("symbol",))]
+
+
+class QuoteFeatureGroup(FeatureGroup):
+    @classmethod
+    def index_columns(cls) -> list[Index] | None:
+        return [Index(("symbol",))]
+
+
 class OrderWithCustomer(FeatureGroup):
     """Join orders with customer data."""
 
@@ -150,17 +175,70 @@ linked sides; mloda hands the merged frame to that group's `calculate_feature`. 
 the link to `run_all` (the `links` parameter is a `set`):
 
 ```python
+import pandas as pd
+from mloda.provider import DataCreator
 from mloda.user import Feature, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
+
+
+class RunEvents(EventFeatureGroup):
+    @classmethod
+    def input_data(cls) -> DataCreator | None:
+        return DataCreator({"id", "symbol", "event_ts"})
+
+    @classmethod
+    def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
+        ts = pd.to_datetime(["2023-01-01 10:15", "2023-01-01 10:45"])
+        return pd.DataFrame({"id": [0, 1], "symbol": ["AAA", "AAA"], "event_ts": ts})
+
+    @classmethod
+    def compute_framework_rule(cls) -> Any:
+        return {PandasDataFrame}
+
+
+class RunQuotes(QuoteFeatureGroup):
+    @classmethod
+    def input_data(cls) -> DataCreator | None:
+        return DataCreator({"symbol", "quote_ts", "price"})
+
+    @classmethod
+    def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
+        ts = pd.to_datetime(["2023-01-01 10:00", "2023-01-01 10:30"])
+        return pd.DataFrame({"symbol": ["AAA", "AAA"], "quote_ts": ts, "price": [100, 110]})
+
+    @classmethod
+    def compute_framework_rule(cls) -> Any:
+        return {PandasDataFrame}
+
+
+class EventPriceFeatureGroup(FeatureGroup):
+    @classmethod
+    def feature_names_supported(cls) -> set[str]:
+        return {"asof_event_id", "asof_event_price"}
+
+    def input_features(self, options: Options, feature_name: FeatureName) -> set[Feature] | None:
+        return {Feature("id"), Feature("event_ts"), Feature("quote_ts"), Feature("price")}
+
+    @classmethod
+    def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
+        return pd.DataFrame({"asof_event_id": data["id"], "asof_event_price": data["price"]})
+
+    @classmethod
+    def compute_framework_rule(cls) -> Any:
+        return {PandasDataFrame}
+
+
+link = Link.asof_on(
+    RunEvents, RunQuotes, left_time_column="event_ts", right_time_column="quote_ts", direction="backward"
+)
 
 results = mloda.run_all(
     [Feature("asof_event_id"), Feature("asof_event_price")],
     compute_frameworks=[PandasDataFrame],
     links={link},
-    plugin_collector=PluginCollector.enabled_feature_groups(
-        {EventFeatureGroup, QuoteFeatureGroup, EventPriceFeatureGroup}
-    ),
+    plugin_collector=PluginCollector.enabled_feature_groups({RunEvents, RunQuotes, EventPriceFeatureGroup}),
 )
+assert list(results[0]["asof_event_price"]) == [100, 110]
 ```
 
 A complete, runnable version (two `DataCreator`-backed source feature groups, a small
@@ -173,7 +251,7 @@ registry test suite:
 Specifies join columns directly. No `index_columns()` needed on the feature group.
 The engine automatically injects the specified join columns into the feature group's feature set.
 
-```python
+```py
 link = Link.inner(left=JoinSpec(FeatureGroupA, "id"), right=JoinSpec(FeatureGroupB, "ref_id"))
 ```
 
@@ -181,7 +259,7 @@ link = Link.inner(left=JoinSpec(FeatureGroupA, "id"), right=JoinSpec(FeatureGrou
 
 Auto-derives join columns from `index_columns()`.
 
-```python
+```py
 link = Link.inner_on(UserFeatureGroup, OrderFeatureGroup)
 
 # Select specific index position
@@ -190,7 +268,7 @@ link = Link.inner_on(UserFG, OrderFG, left_index=0, right_index=1)
 
 ## Self-Joins with Aliases
 
-```python
+```py
 link = Link.inner_on(
     UserFeatureGroup, UserFeatureGroup, self_left_alias={"side": "left"}, self_right_alias={"side": "right"}
 )
@@ -232,7 +310,7 @@ A link on one input is enough from mloda 0.14.0. Older cores register a link onl
 
 ## Multi-Table Join (Aggregate + Left-Join)
 
-```python
+```py
 link = Link.left(
     left=JoinSpec(CustomerFeatures, Index(("customer_id",))),
     right=JoinSpec(OrderAggregation, Index(("customer_id",))),

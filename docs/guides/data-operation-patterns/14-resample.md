@@ -66,14 +66,22 @@ The all-null `sum` cell is the one place backends disagree by default (pandas â†
 ## Usage
 
 ```python
+from datetime import datetime
+
 from mloda.user import Feature, Options, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {
+    "ts": [datetime(2023, 1, 1, 10, 5), datetime(2023, 1, 1, 10, 35), datetime(2023, 1, 1, 11, 10)],
+    "symbol": ["A", "A", "A"],
+    "price": [1.0, 3.0, 5.0],
+}
+
 features = [
     Feature("price__resample_1_hour_mean", Options(context={"time_column": "ts", "partition_by": ["symbol"]})),
 ]
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 The result has one row per occupied hour per symbol, not one row per input event.

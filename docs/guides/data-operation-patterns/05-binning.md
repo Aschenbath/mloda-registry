@@ -66,7 +66,7 @@ The `PARTITION BY CASE WHEN ...` clause is what ensures NULL/NaN rows do not par
 
 `NTILE` requires `ORDER BY col`, which produces rows sorted by `col`, not by original input order. The row-preserving contract requires input order. The fix uses the typed `with_row_number` / `window` API and a collision-free helper name from `pick_helper_column_name`:
 
-```python
+```py
 # Paraphrased from duckdb_binning.py
 rn = pick_helper_column_name(taken=set(data.columns) | {feature_name})
 tagged = data.with_row_number(rn)
@@ -93,12 +93,14 @@ from mloda.user import Feature, PluginLoader, mloda
 
 PluginLoader.all()
 
+data = {"value_int": [10, -5, 0, 20, 50, 30, 60, 15]}
+
 features = [
     Feature("value_int__bin_5"),  # equal-width, 5 bins
     Feature("value_int__qbin_4"),  # quartiles
 ]
 
-result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"])
+result = mloda.run_all(features, compute_frameworks=["PandasDataFrame"], api_data={"Src": data})
 ```
 
 Row count matches the input; each new column contains integers in `[0, N-1]` (or NULL for unbinnable rows).
