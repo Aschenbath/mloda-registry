@@ -25,7 +25,7 @@ import pkgutil
 import re
 import subprocess  # nosec
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,9 +37,12 @@ from mloda.core.abstract_plugins.components.feature import Feature
 from mloda.core.abstract_plugins.components.utils import get_all_subclasses
 from mloda.core.abstract_plugins.compute_framework import ComputeFramework
 from mloda.core.abstract_plugins.feature_group import FeatureGroup
+from mloda.provider import DataCreator, FeatureSet, ImplementationPinError
 from mloda.steward import resolve_feature
 from mloda.user import DataAccessCollection, Options, PluginCollector, load_features_from_config
 from mloda.user import mloda as real_mloda
+from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
+from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 from mloda_plugins.compute_framework.base_implementations.python_dict.python_dict_framework import PythonDictFramework
 
 import mloda.community.feature_groups.data_operations as data_operations
@@ -56,6 +59,11 @@ WAY_2_MODULE = "guide_28_way_2"
 WAY_3_HEADING = "## Way 3: Reader Delegation (Sibling Readers)"
 WAY_3_MODULE = "guide_28_way_3"
 TEST_HEADING = "\n## Test\n"
+FRAMEWORK_SPECIFIC_GUIDE = REPO_ROOT / "docs" / "guides" / "feature-group-patterns" / "09-framework-specific.md"
+TESTING_GUIDE = REPO_ROOT / "docs" / "guides" / "feature-group-patterns" / "10-testing-guide.md"
+REFERENCE_CONTRACT_HEADING = "## Reference Contract and Divergence"
+REFERENCE_CONTRACT_MODULE = "guide_09_reference_contract"
+CONFORMANCE_HEADING = "## Operation Groups: Conformance to the Reference Contract"
 
 _FENCE_RE = re.compile(r"```(json|python|py)\n(.*?)```", re.DOTALL)
 _CONFIG_STRING_RE = re.compile(r'config\s*=\s*"""(.*?)"""', re.DOTALL)
@@ -199,17 +207,17 @@ def test_missing_partition_by_regression_is_rejected() -> None:
     assert "AggregationFeatureGroup" in problems[0]
 
 
-def _python_fences(heading: str) -> list[str]:
-    section = _section(BACKEND_FAMILIES_GUIDE.read_text(encoding="utf-8"), heading, ("\n## ",))
+def _python_fences(heading: str, guide: Path = BACKEND_FAMILIES_GUIDE) -> list[str]:
+    section = _section(guide.read_text(encoding="utf-8"), heading, ("\n## ",))
     return [m.group(2) for m in _FENCE_RE.finditer(section) if m.group(1) == "python"]
 
 
 @lru_cache(maxsize=None)
-def _load_namespace(heading: str, module: str) -> dict[str, Any]:
+def _load_namespace(heading: str, module: str, guide: Path = BACKEND_FAMILIES_GUIDE) -> dict[str, Any]:
     """Run the first python block of the guide section under *heading* once and return its namespace."""
-    fences = _python_fences(heading)
-    assert fences, f"no python block found in the {heading!r} section of the guide"
-    code = compile(fences[0], f"<{BACKEND_FAMILIES_GUIDE.name} {module}>", "exec", dont_inherit=True)
+    fences = _python_fences(heading, guide)
+    assert fences, f"no python block found in the {heading!r} section of {guide.name}"
+    code = compile(fences[0], f"<{guide.name} {module}>", "exec", dont_inherit=True)
     namespace: dict[str, Any] = {"__name__": module}
     exec(code, namespace)  # nosec
     return namespace
@@ -321,16 +329,26 @@ def test_way_3_collection_without_the_slot_resolves_to_nothing() -> None:
     assert "No feature groups found" in str(result.error)
 
 
+def _exec_section_tests(fence: str, label: str, base_namespace: dict[str, Any], what: str) -> list[Callable[..., Any]]:
+    """Exec *fence* in a copy of *base_namespace* and return the ``test_`` callables it newly defines."""
+    namespace = dict(base_namespace)
+    before = set(namespace)
+    exec(compile(fence, f"<{label}>", "exec", dont_inherit=True), namespace)  # nosec
+    tests = [v for k, v in namespace.items() if k not in before and k.startswith("test_") and callable(v)]
+    assert tests, f"the {what} python block no longer defines a test_ function"
+    return tests
+
+
 def test_test_section_sibling_test_passes_against_the_way_2_example() -> None:
     fences = _python_fences(TEST_HEADING)
     assert fences, "the Test section of the guide no longer has a python block with a sibling test"
-    namespace = dict(_load_namespace(WAY_2_HEADING, WAY_2_MODULE))
-    before = set(namespace)
-    code = compile(fences[0], f"<{BACKEND_FAMILIES_GUIDE.name} Test>", "exec", dont_inherit=True)
     with patch("mloda.steward.resolve_feature", wraps=resolve_feature) as spy:
-        exec(code, namespace)  # nosec
-        tests = [v for k, v in namespace.items() if k not in before and k.startswith("test_") and callable(v)]
-        assert tests, "the Test section python block no longer defines a test_ function"
+        tests = _exec_section_tests(
+            fences[0],
+            f"{BACKEND_FAMILIES_GUIDE.name} Test",
+            _load_namespace(WAY_2_HEADING, WAY_2_MODULE),
+            "Test section",
+        )
         for sibling_test in tests:
             sibling_test()
         assert spy.called, "the Test section sibling test no longer calls resolve_feature"
@@ -342,6 +360,133 @@ def test_test_section_sibling_test_passes_against_the_way_2_example() -> None:
         for sibling_test in tests:
             with pytest.raises(AssertionError):
                 sibling_test()
+
+
+@lru_cache(maxsize=1)
+def _price_source() -> type[FeatureGroup]:
+    """Pandas-only source of a ``price`` column with a NaN, built on first use so nothing registers at import."""
+
+    class PriceSource(FeatureGroup):
+        @classmethod
+        def input_data(cls) -> DataCreator:
+            return DataCreator({"price"})
+
+        @classmethod
+        def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
+            return {"price": [1.0, float("nan"), 3.0]}
+
+        @classmethod
+        def compute_framework_rule(cls) -> set[type[ComputeFramework]]:
+            return {PandasDataFrame}
+
+    return PriceSource
+
+
+def _column_total_request(feature: str | Feature) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The guide 09 namespace and the shared ``explain``/``run_all`` keyword arguments for *feature*."""
+    namespace = _load_namespace(REFERENCE_CONTRACT_HEADING, REFERENCE_CONTRACT_MODULE, FRAMEWORK_SPECIFIC_GUIDE)
+    assert "ColumnTotal" in namespace, "the Reference Contract block no longer defines ColumnTotal"
+    kwargs: dict[str, Any] = {
+        "compute_frameworks": [PandasDataFrame, PyArrowTable],
+        "plugin_collector": PluginCollector.enabled_feature_groups({_price_source(), namespace["ColumnTotal"]}),
+    }
+    return namespace, kwargs
+
+
+def _column_total_step(feature: str | Feature) -> tuple[dict[str, Any], Any]:
+    namespace, kwargs = _column_total_request(feature)
+    steps = real_mloda.explain([feature], **kwargs)
+    matching = [s for s in steps if s.feature_group is namespace["ColumnTotal"] and s.implementation is not None]
+    assert len(matching) == 1, f"expected exactly one ColumnTotal compute step with an implementation: {steps!r}"
+    return namespace, matching[0]
+
+
+def _operation_groups_usage_feature() -> Feature:
+    fences = _python_fences(REFERENCE_CONTRACT_HEADING, FRAMEWORK_SPECIFIC_GUIDE)
+    assert len(fences) >= 2, (
+        "the Reference Contract section no longer has a second python block with the pin expression"
+    )
+    code = compile(fences[1], f"<{FRAMEWORK_SPECIFIC_GUIDE.name} pin>", "eval", dont_inherit=True)
+    feature = eval(code, {"Feature": Feature})  # nosec
+    assert isinstance(feature, Feature), f"the pin block no longer evaluates to a Feature: {feature!r}"
+    return feature
+
+
+def test_operation_group_unpinned_prefers_the_matching_version() -> None:
+    namespace, step = _column_total_step("price__sum_total")
+    assert step.implementation is namespace["PyArrowColumnTotal"], step.implementation
+    assert "prefers a matching version" in str(step.compute_framework_reason), step.compute_framework_reason
+
+
+def test_operation_group_guide_pin_selects_the_divergent_version() -> None:
+    namespace, step = _column_total_step(_operation_groups_usage_feature())
+    reason = str(step.compute_framework_reason)
+    assert step.implementation is namespace["PandasColumnTotal"], step.implementation
+    assert "pinned" in reason, reason
+    assert "runs a version that differs: skips NaN in sum" in reason, reason
+
+
+def _column_total_values(feature: str | Feature, column: str) -> list[Any]:
+    """Run *feature* for real and return *column* of the (pandas or pyarrow) result as a python list."""
+    _, kwargs = _column_total_request(feature)
+    results = real_mloda.run_all([feature], **kwargs)
+    assert len(results) == 1, f"expected one result frame, got {len(results)}"
+    return list(results[0][column].to_pylist() if hasattr(results[0][column], "to_pylist") else results[0][column])
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value != value  # noqa: PLR0124
+
+
+def test_operation_group_unpinned_sum_propagates_the_missing_value() -> None:
+    values = _column_total_values("price__sum_total", "price__sum_total")
+    assert len(values) == 3 and all(_is_missing(v) for v in values), values
+
+
+def test_operation_group_guide_pin_sums_skipping_the_missing_value() -> None:
+    feature = _operation_groups_usage_feature()
+    assert _column_total_values(feature, "price__sum_total") == [4.0, 4.0, 4.0]
+
+
+def test_operation_group_unpinned_max_skips_the_missing_value() -> None:
+    assert _column_total_values("price__max_total", "price__max_total") == [3.0, 3.0, 3.0]
+
+
+def test_operation_group_unknown_pin_raises() -> None:
+    with pytest.raises(ImplementationPinError):
+        _column_total_step(Feature("price__sum_total", implementation="Nope"))
+
+
+def _parametrized_calls(fn: Any) -> list[dict[str, Any]]:
+    """Every keyword combination of the ``pytest.mark.parametrize`` marks on *fn*."""
+    calls: list[dict[str, Any]] = [{}]
+    for mark in getattr(fn, "pytestmark", []):
+        if mark.name != "parametrize":
+            continue
+        names = [n.strip() for n in mark.args[0].split(",")] if isinstance(mark.args[0], str) else list(mark.args[0])
+        rows = [
+            tuple(row.values) if isinstance(row, type(pytest.param())) else row if len(names) > 1 else (row,)
+            for row in mark.args[1]
+        ]
+        calls = [{**call, **dict(zip(names, row, strict=True))} for call in calls for row in rows]
+    return calls
+
+
+def test_conformance_section_test_passes_against_the_operation_group_example() -> None:
+    fences = _python_fences(CONFORMANCE_HEADING, TESTING_GUIDE)
+    assert fences, "the Conformance section of the testing guide no longer has a python block"
+    tests = _exec_section_tests(
+        fences[0],
+        f"{TESTING_GUIDE.name} Conformance",
+        _load_namespace(REFERENCE_CONTRACT_HEADING, REFERENCE_CONTRACT_MODULE, FRAMEWORK_SPECIFIC_GUIDE),
+        "Conformance section",
+    )
+    calls = 0
+    for conformance_test in tests:
+        for kwargs in _parametrized_calls(conformance_test):
+            conformance_test(**kwargs)
+            calls += 1
+    assert calls > 0, "the Conformance section test was never called"
 
 
 # Each entry must also pass on its own and on every supported Python: they share one interpreter, in order.
@@ -358,6 +503,7 @@ RUNNABLE_DOCS = (
     "docs/guides/feature-group-patterns/02-derived-features.md",
     "docs/guides/feature-group-patterns/03-chained-features.md",
     "docs/guides/feature-group-patterns/04-multi-input-features.md",
+    "docs/guides/feature-group-patterns/05-multi-output-features.md",
     "docs/guides/feature-group-patterns/06-artifact-features.md",
     "docs/guides/feature-group-patterns/09-framework-specific.md",
     "docs/guides/feature-group-patterns/11-options.md",

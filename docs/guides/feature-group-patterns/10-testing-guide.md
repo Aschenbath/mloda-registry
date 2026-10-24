@@ -109,6 +109,77 @@ def test_derived_feature_isolated():
 
 Use when upstream features are slow (API calls, ML inference) or you need controlled test data.
 
+## Operation Groups: Conformance to the Reference Contract
+
+Test that each result differs from the reference exactly where `divergent` declares it. The example uses the `ColumnTotal` classes from [09](09-framework-specific.md#reference-contract-and-divergence) (in the same namespace, not imported again).
+
+```python
+import math
+from typing import Any
+
+from mloda.provider import DataCreator, FeatureGroup, FeatureSet
+from mloda.user import Feature, PluginCollector, mloda
+from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
+from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
+import pytest
+
+VALUES = [1.0, math.nan, 3.0]
+
+EXPECTED = {
+    PandasColumnTotal: {"sum": "skips NaN in sum"},
+    PyArrowColumnTotal: {},
+}
+
+
+class Guide10Prices(FeatureGroup):
+    """Pandas-only source with a missing value."""
+
+    @classmethod
+    def input_data(cls) -> DataCreator:
+        return DataCreator({"guide10_price"})
+
+    @classmethod
+    def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
+        return {"guide10_price": VALUES}
+
+    @classmethod
+    def compute_framework_rule(cls) -> set[type[Any]]:
+        return {PandasDataFrame}
+
+
+def is_missing(value: Any) -> bool:
+    return value is None or value != value
+
+
+def reference(op: str, values: list[float]) -> float | None:
+    """The documented reference contract: a missing value propagates in sum, max skips missing values."""
+    present = [v for v in values if not is_missing(v)]
+    if op == "sum":
+        return None if len(present) < len(values) else sum(present)
+    return max(present)
+
+
+def same(a: Any, b: Any) -> bool:
+    return (is_missing(a) and is_missing(b)) or a == b
+
+
+@pytest.mark.parametrize("implementation", [PandasColumnTotal, PyArrowColumnTotal])
+@pytest.mark.parametrize("op", ["sum", "max"])
+def test_result_differs_from_the_reference_exactly_when_declared(implementation, op):
+    assert dict(implementation.divergent) == EXPECTED[implementation]
+    name = f"guide10_price__{op}_total"
+    result = mloda.run_all(
+        [Feature(name, implementation=implementation)],
+        compute_frameworks=[PandasDataFrame, PyArrowTable],
+        plugin_collector=PluginCollector.enabled_feature_groups({Guide10Prices, ColumnTotal}),
+    )[0][name]
+    value = list(result.to_pylist() if hasattr(result, "to_pylist") else result)[0]
+    differs = not same(value, reference(op, VALUES))
+    assert differs == (op in implementation.divergent)
+```
+
+Assert the chosen implementation with `mloda.explain(...)` (`step.implementation`). See mloda's own [test_aggregated_subtype_declaration.py](https://github.com/mloda-ai/mloda/blob/0.17.0/tests/test_plugins/feature_group/experimental/test_base_aggregated_feature_group/test_aggregated_subtype_declaration.py).
+
 ## Locking a Shipped Plan
 
 An integration-scope check that resolves a request without running it: for a plugin that ships request definitions (recipes, demos), lock the resolved plan so a planner, compute framework or source group change fails a test. `mloda.explain` takes `run_all`'s planning arguments as keywords; pass the ones the shipped request uses, an ordered `compute_frameworks` list, a pinned `plugin_collector` so other installed plugins cannot change the plan, and `parallelization_modes={ParallelizationMode.SYNC}`, which `run_all` defaults to and `explain` does not:
@@ -189,6 +260,7 @@ def test_plugin_import_loads_only_its_groups() -> None:
 | Artifact | `artifact()` returns class | Save/load cycle |
 | Index | `index_columns()` correct | Ordering respected |
 | Framework | `compute_framework_rule()` | Framework-specific ops |
+| Operation group | Implementations load; `supported` / `accepts` | Conformance to the reference contract |
 
 ## Real Test Examples
 
