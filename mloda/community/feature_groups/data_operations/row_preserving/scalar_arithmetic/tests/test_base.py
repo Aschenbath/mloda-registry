@@ -15,7 +15,7 @@ from mloda.community.feature_groups.data_operations.row_preserving.scalar_arithm
     PyArrowScalarArithmetic,
 )
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
-from mloda.testing.feature_groups.data_operations.helpers import extract_column, feature_set_for
+from mloda.testing.feature_groups.data_operations.helpers import calculate_with, extract_column, feature_set_for
 from mloda.testing.feature_groups.data_operations.match_validation import MatchValidationTestBase, TokenCase
 
 
@@ -232,7 +232,7 @@ class TestSingleColumnEnforcement:
                 "constant": 5,
             }
         )
-        instance = PyArrowScalarArithmetic()
+        instance = ScalarArithmeticFeatureGroup()
         with pytest.raises(ValueError, match="at most 1"):
             instance.input_features(options, FeatureName("my_result"))
 
@@ -269,7 +269,7 @@ class TestSingleColumnEnforcement:
 
     def test_input_features_returns_single_feature_for_string_pattern(self) -> None:
         options = Options(context={"constant": 5})
-        instance = PyArrowScalarArithmetic()
+        instance = ScalarArithmeticFeatureGroup()
         result = instance.input_features(options, FeatureName("value_int__add_constant"))
         assert result is not None
         assert len(result) == 1
@@ -284,7 +284,7 @@ class TestSingleColumnEnforcement:
                 "constant": 5,
             }
         )
-        instance = PyArrowScalarArithmetic()
+        instance = ScalarArithmeticFeatureGroup()
         result = instance.input_features(options, FeatureName("my_add_result"))
         assert result is not None
         assert len(result) == 1
@@ -366,8 +366,8 @@ class TestScalarArithmeticMatchValidation(MatchValidationTestBase):
     @classmethod
     def compute_values(cls, options: Options) -> list[Any] | None:
         # The #339 regression: constant=(5,) matched at discovery and then raised
-        # "must be int or float, got tuple" inside calculate_feature.
-        result = PyArrowScalarArithmetic.calculate_feature(
-            PyArrowDataOpsTestDataCreator.create(), feature_set_for("my_result", options)
+        # "must be int or float, got tuple" while computing.
+        result = calculate_with(
+            PyArrowScalarArithmetic, PyArrowDataOpsTestDataCreator.create(), feature_set_for("my_result", options)
         )
         return extract_column(result, "my_result")

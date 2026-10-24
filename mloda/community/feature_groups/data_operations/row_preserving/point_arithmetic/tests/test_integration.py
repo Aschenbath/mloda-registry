@@ -13,11 +13,14 @@ import pytest
 from mloda.user import Feature, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
-from mloda.community.feature_groups.data_operations.row_preserving.point_arithmetic.pyarrow_point_arithmetic import (
-    PyArrowPointArithmetic,
+from mloda.community.feature_groups.data_operations.row_preserving.point_arithmetic.base import (
+    PointArithmeticFeatureGroup,
 )
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+    OperationGroupIntegrationTestMixin,
+)
 from mloda.testing.feature_groups.data_operations.row_preserving.point_arithmetic.point_arithmetic import (
     EXPECTED_ADD,
     EXPECTED_MULTIPLY,
@@ -38,10 +41,10 @@ def _approx_equal(actual: list[Any], expected: list[Any]) -> bool:
     return True
 
 
-class TestPointArithmeticIntegration(DataOpsIntegrationTestBase):
+class TestPointArithmeticIntegration(OperationGroupIntegrationTestMixin, DataOpsIntegrationTestBase):
     @classmethod
     def feature_group_class(cls) -> type:
-        return PyArrowPointArithmetic
+        return PointArithmeticFeatureGroup
 
     @classmethod
     def data_creator_class(cls) -> type:
@@ -125,7 +128,7 @@ class TestPointArithmeticIntegration(DataOpsIntegrationTestBase):
 class TestIntegrationMultipleFeatures:
     def test_add_and_multiply_together(self) -> None:
         plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowPointArithmetic}
+            {PyArrowDataOpsTestDataCreator, PointArithmeticFeatureGroup}
         )
 
         f_add = Feature("value_int&amount__add_point")
@@ -162,7 +165,7 @@ class TestIntegrationOptionBasedConfig:
 
     def test_option_based_add_through_pipeline(self) -> None:
         plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowPointArithmetic}
+            {PyArrowDataOpsTestDataCreator, PointArithmeticFeatureGroup}
         )
 
         feature = Feature(
@@ -195,7 +198,7 @@ class TestIntegrationOptionBasedConfig:
 
     def test_option_based_subtract_through_pipeline(self) -> None:
         plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowPointArithmetic}
+            {PyArrowDataOpsTestDataCreator, PointArithmeticFeatureGroup}
         )
 
         feature = Feature(
@@ -227,7 +230,7 @@ class TestIntegrationOptionBasedConfig:
 
     def test_string_and_option_features_together(self) -> None:
         plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowPointArithmetic}
+            {PyArrowDataOpsTestDataCreator, PointArithmeticFeatureGroup}
         )
 
         f_pattern = Feature("value_int&amount__add_point")
