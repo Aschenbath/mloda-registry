@@ -30,13 +30,15 @@ These properties make PyArrow a reasonable ground truth. It is not faster than t
 # self.test_data is the framework-native test fixture
 # self._arrow_table is the same data as a PyArrow table
 fs = make_feature_set(feature_name, partition_by=partition_by, order_by=order_by)
-result = self.implementation_class().calculate_feature(self.test_data, fs)
-ref = self.reference_implementation_class().calculate_feature(self._arrow_table, fs)
+result = calculate_with(self.implementation_class(), self.test_data, fs)
+ref = self.reference_calculate(self._arrow_table, fs)
 
 result_col = self.extract_column(result, feature_name)
 ref_col = _extract_column(ref, feature_name)
 assert result_col == ref_col  # or pytest.approx for floats
 ```
+
+Aggregation is the exception: it is one `OperationFeatureGroup` served by one `Implementation` per framework, so `AggregationTestBase` has no `reference_implementation_class`. Its reference is the function `reference_aggregation(table, features)` in `mloda/testing/feature_groups/data_operations/aggregation/reference.py`, reached through `reference_calculate`, and the test kit runs the implementation with `calculate_with` (`mloda/testing/feature_groups/data_operations/helpers.py`). Its NaN divergences come from the implementation's shipped `divergent` mapping.
 
 `self.test_data` is produced by the framework mixin's `create_test_data(pa.Table)`. The canonical input is always PyArrow; the mixin converts it once per test. This keeps the fixtures aligned: both sides compute from the *same* starting values, just in different native representations.
 

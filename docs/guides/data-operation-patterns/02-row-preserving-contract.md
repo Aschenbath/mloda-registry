@@ -16,8 +16,8 @@ Row-preserving operations must return an output whose row count and row order ma
 
 ```python
 # Paraphrased from DataOpsTestBase
-result = self.implementation_class().calculate_feature(self.test_data, fs)
-ref = self.reference_implementation_class().calculate_feature(self._arrow_table, fs)
+result = calculate_with(self.implementation_class(), self.test_data, fs)
+ref = self.reference_calculate(self._arrow_table, fs)
 
 result_col = self.extract_column(result, feature_name)
 ref_col = _extract_column(ref, feature_name)
@@ -103,7 +103,7 @@ If your framework reorders, you will see row-count assertions pass but value com
 
 ## Aggregation is different
 
-Aggregations under `data_operations/aggregation/` are **not** row-preserving. They reduce to one row per partition key. The [reference implementation](03-reference-implementation.md) still applies (PyArrow defines the expected result), but row count is expected to shrink.
+Aggregations under `data_operations/aggregation/` are **not** row-preserving. They reduce to one row per partition key. The [reference implementation](03-reference-implementation.md) still applies (PyArrow defines the expected result, through the function `reference_aggregation(table, features)`), but row count is expected to shrink. Aggregation is one `AggregationFeatureGroup` with one `Implementation` per framework (`PandasAggregation`, `PyArrowAggregation`, ...); see [Framework-Specific](../feature-group-patterns/09-framework-specific.md).
 
 ---
 

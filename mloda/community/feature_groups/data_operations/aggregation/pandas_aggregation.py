@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from mloda.provider import ComputeFramework
+from mloda.provider import ComputeFramework, FeatureSet, Implementation
 from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
 from mloda_plugins.compute_framework.base_implementations.pandas.pandas_mask_engine import (
     PandasMaskEngine,
@@ -28,10 +28,28 @@ from mloda.community.feature_groups.data_operations.pandas_helpers import (
 _SUPPORTED_AGG_TYPES = {*PANDAS_AGG_FUNCS.keys(), "mode"}
 
 
-class PandasAggregation(AggregationFeatureGroup):
+class PandasAggregation(Implementation[AggregationFeatureGroup]):
+    feature_group = AggregationFeatureGroup
+    compute_framework = PandasDataFrame
+    divergent = {
+        "sum": "skips NaN",
+        "avg": "skips NaN",
+        "mean": "skips NaN",
+        "std": "skips NaN",
+        "var": "skips NaN",
+        "std_pop": "skips NaN",
+        "var_pop": "skips NaN",
+        "std_samp": "skips NaN",
+        "var_samp": "skips NaN",
+        "count": "does not count NaN",
+        "mode": "does not count NaN as a value",
+    }
+
     @classmethod
-    def compute_framework_rule(cls) -> set[type[ComputeFramework]] | None:
-        return {PandasDataFrame}
+    def calculate(
+        cls, group: type[AggregationFeatureGroup], data: Any, features: FeatureSet, framework: ComputeFramework | None
+    ) -> Any:
+        return group.aggregate(data, features, compute_group=cls._compute_group)
 
     @classmethod
     def _compute_group(
