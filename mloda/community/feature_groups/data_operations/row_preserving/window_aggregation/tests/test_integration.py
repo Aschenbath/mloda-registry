@@ -13,23 +13,34 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
-from mloda.user import Feature, Options, PluginCollector, mloda
+from mloda.user import Feature, Options, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
-from mloda.community.feature_groups.data_operations.row_preserving.window_aggregation.pyarrow_window_aggregation import (
-    PyArrowWindowAggregation,
+from mloda.community.feature_groups.data_operations.row_preserving.window_aggregation.base import (
+    WindowAggregationFeatureGroup,
 )
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
-from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+from mloda.testing.feature_groups.data_operations.integration import (
+    DataOpsIntegrationTestBase,
+    enabled_with_implementations,
+)
 from mloda.testing.feature_groups.data_operations.mixins.mask_integration import MaskIntegrationTestMixin
+from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+    PANDAS_DATAFRAME,
+    PYARROW_TABLE,
+    OperationGroupIntegrationTestMixin,
+    RoutingCase,
+)
 
 
-class TestWindowAggregationIntegration(MaskIntegrationTestMixin, DataOpsIntegrationTestBase):
+class TestWindowAggregationIntegration(
+    MaskIntegrationTestMixin, OperationGroupIntegrationTestMixin, DataOpsIntegrationTestBase
+):
     """Standard integration tests inherited from the base class."""
 
     @classmethod
     def feature_group_class(cls) -> type:
-        return PyArrowWindowAggregation
+        return WindowAggregationFeatureGroup
 
     @classmethod
     def data_creator_class(cls) -> type:
@@ -79,6 +90,32 @@ class TestWindowAggregationIntegration(MaskIntegrationTestMixin, DataOpsIntegrat
     def use_approx(cls) -> bool:
         return True
 
+    # -- OperationGroupIntegrationTestMixin configuration ----------------------
+
+    @classmethod
+    def divergent_routing_cases(cls) -> list[RoutingCase]:
+        package = "mloda.community.feature_groups.data_operations.row_preserving.window_aggregation"
+        options = {"partition_by": ["region"]}
+        return [
+            RoutingCase(
+                "value_int__sum_window",
+                options,
+                f"{package}.pyarrow_window_aggregation:PyArrowWindowAggregation",
+                PYARROW_TABLE,
+            ),
+            RoutingCase(
+                "value_int__max_window",
+                options,
+                f"{package}.pandas_window_aggregation:PandasWindowAggregation",
+                PANDAS_DATAFRAME,
+            ),
+        ]
+
+    @classmethod
+    def unsupported_framework_case(cls) -> tuple[str, dict[str, Any]] | None:
+        # PyArrow has no window median.
+        return "value_int__median_window", {"partition_by": ["region"]}
+
     # -- MaskIntegrationTestMixin configuration --------------------------------
 
     @classmethod
@@ -109,9 +146,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_sum_and_avg_together(self) -> None:
         """Request both sum and avg features in one pipeline run."""
-        plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowWindowAggregation}
-        )
+        plugin_collector = enabled_with_implementations({PyArrowDataOpsTestDataCreator, WindowAggregationFeatureGroup})
 
         f_sum = Feature(
             "value_int__sum_window",
@@ -164,9 +199,7 @@ class TestIntegrationMultipleFeatures:
 
     def test_different_aggregation_types(self) -> None:
         """Request min and max features in one pipeline run."""
-        plugin_collector = PluginCollector.enabled_feature_groups(
-            {PyArrowDataOpsTestDataCreator, PyArrowWindowAggregation}
-        )
+        plugin_collector = enabled_with_implementations({PyArrowDataOpsTestDataCreator, WindowAggregationFeatureGroup})
 
         f_min = Feature(
             "value_int__min_window",

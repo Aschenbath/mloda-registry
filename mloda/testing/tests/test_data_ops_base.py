@@ -1,6 +1,11 @@
 """Tests for the shared ``DataOpsTestBase`` helpers."""
 
+import gc
+import importlib
+import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -248,8 +253,6 @@ def test_feature_group_of_returns_a_feature_group_class_itself() -> None:
 
 
 def test_calculate_with_and_feature_group_of_for_an_implementation() -> None:
-    import gc
-
     from mloda.provider import Implementation, OperationFeatureGroup, get_all_subclasses
     from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
@@ -318,33 +321,227 @@ def test_reference_calculate_defaults_to_the_reference_class_calculate_feature()
     assert _RecordingImpl.seen == [{"partition_by": ["g"]}]
 
 
-def _reference_calculate_with_an_implementation_reference() -> Any:
+def _make_impl(
+    divergent: dict[str, str] | None = None, accepts: Callable[[Any, str, Any], bool] | None = None
+) -> tuple[Any, Any]:
+    """A throwaway (group, implementation) pair; use ``_with_probe_impl`` so it is unregistered again."""
     from mloda.provider import Implementation, OperationFeatureGroup
     from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
-    class _RefGroup(OperationFeatureGroup):
-        @classmethod
-        def calculate_feature(cls, data: Any, features: Any) -> Any:
-            return ("group", data, features.implementation)
+    class _ProbeGroup(OperationFeatureGroup):
+        pass
 
-    class _RefImpl(Implementation[_RefGroup]):
-        feature_group = _RefGroup
+    class _ProbeImpl(Implementation[_ProbeGroup]):
+        feature_group = _ProbeGroup
         compute_framework = PyArrowTable
 
-    class _ImplRefStub(_StubDataOpsTestBase):
+        @classmethod
+        def calculate(cls, group: Any, data: Any, features: Any, framework: Any) -> Any:
+            return ("implementation", group, data)
+
+    if divergent is not None:
+        _ProbeImpl.divergent = divergent
+    if accepts is not None:
+        _ProbeImpl.accepts = classmethod(accepts)  # type: ignore[method-assign, assignment]
+    return _ProbeGroup, _ProbeImpl
+
+
+def _probe_impl_names() -> list[str]:
+    from mloda.provider import Implementation, get_all_subclasses
+
+    return [c.__name__ for c in get_all_subclasses(Implementation) if c.__name__ == "_ProbeImpl"]
+
+
+def _with_probe_impl(
+    check: Callable[[Any, Any], None],
+    divergent: dict[str, str] | None = None,
+    accepts: Callable[[Any, str, Any], bool] | None = None,
+) -> None:
+    """Run ``check(group, impl)`` on a throwaway pair, then drop it and assert the probe is unregistered."""
+    group, impl = _make_impl(divergent, accepts)
+    try:
+        check(group, impl)
+    finally:
+        del group, impl
+        gc.collect()
+    assert not _probe_impl_names()
+
+
+def _stub_for(impl: Any, *, reference: bool) -> type[_StubDataOpsTestBase]:
+    class _ImplStub(_StubDataOpsTestBase):
         @classmethod
         def implementation_class(cls) -> Any:
-            return _RefImpl
+            return impl
 
         @classmethod
         def reference_implementation_class(cls) -> Any:
-            return _RefImpl
+            if not reference:
+                raise NotImplementedError
+            return impl
 
-    result = _ImplRefStub.reference_calculate("data", helpers.make_feature_set("f"))
-    return result, _RefImpl.__name__
+    return _ImplStub
 
 
-def test_reference_calculate_runs_an_implementation_reference_through_its_feature_group() -> None:
-    (tag, data, implementation), name = _reference_calculate_with_an_implementation_reference()
-    assert (tag, data) == ("group", "data")
-    assert implementation.__name__ == name
+def test_reference_calculate_default_runs_an_implementation_reference() -> None:
+    def check(group: Any, impl: Any) -> None:
+        fs = helpers.make_feature_set("f")
+        result = _stub_for(impl, reference=True).reference_calculate(pa.table({"f": [1]}), fs)
+        assert result[0] == "implementation"
+        assert result[1] is group
+        assert fs.implementation is impl
+
+    _with_probe_impl(check)
+
+
+# -- nan_divergent_agg_types default ------------------------------------------
+
+
+def test_nan_divergent_agg_types_default_reads_the_implementation_divergent() -> None:
+    def check(_: Any, impl: Any) -> None:
+        assert _stub_for(impl, reference=False).nan_divergent_agg_types() == frozenset({"sum", "mean"})
+
+    _with_probe_impl(check, {"sum": "skips NaN", "mean": "skips NaN"})
+
+
+def test_nan_divergent_agg_types_default_is_empty_for_an_implementation_without_divergence() -> None:
+    def check(_: Any, impl: Any) -> None:
+        assert _stub_for(impl, reference=False).nan_divergent_agg_types() == frozenset()
+
+    _with_probe_impl(check, {})
+
+
+def test_nan_divergent_agg_types_default_is_empty_for_a_non_implementation() -> None:
+    assert _StubDataOpsTestBase.nan_divergent_agg_types() == frozenset()
+    assert _CompareStub.nan_divergent_agg_types() == frozenset()
+
+
+def test_aggregation_test_base_does_not_override_nan_divergent_agg_types() -> None:
+    from mloda.testing.feature_groups.data_operations.aggregation.aggregation import AggregationTestBase
+
+    assert "nan_divergent_agg_types" not in vars(AggregationTestBase)
+
+
+# -- DataOpsIntegrationTestBase.pipeline_compute_frameworks --------------------
+
+
+def test_pipeline_compute_frameworks_defaults_to_the_compute_framework_class() -> None:
+    from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+
+    class _Marker:
+        pass
+
+    class _IntegrationStub(DataOpsIntegrationTestBase):
+        @classmethod
+        def compute_framework_class(cls) -> type:
+            return _Marker
+
+    assert _IntegrationStub.pipeline_compute_frameworks() == [_Marker]
+
+
+class TestEnabledWithImplementations:
+    """The integration helper loads a group's Implementations through its manifest, so tests need no ad hoc imports."""
+
+    def test_operation_group_loads_its_manifest(self) -> None:
+        from mloda.community.feature_groups.data_operations.aggregation.base import AggregationFeatureGroup
+        from mloda.testing.feature_groups.data_operations.integration import enabled_with_implementations
+
+        collector = enabled_with_implementations({PyArrowDataOpsTestDataCreator, AggregationFeatureGroup})
+        assert "mloda.community.feature_groups.data_operations.aggregation.manifest" in sys.modules
+        assert collector.applicable_feature_group_class(AggregationFeatureGroup)
+
+    def test_non_operation_group_is_left_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mloda.testing.feature_groups.data_operations.integration import load_group_implementations
+
+        imported: list[str] = []
+        real = importlib.import_module
+
+        def recording(name: str, package: str | None = None) -> Any:
+            imported.append(name)
+            return real(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", recording)
+        load_group_implementations(PyArrowDataOpsTestDataCreator)
+        assert imported == []
+
+    def test_group_without_a_manifest_module_is_left_alone(self) -> None:
+        """A plugin package that ships no ``manifest`` module is not an error."""
+        from mloda.provider import OperationFeatureGroup
+
+        from mloda.testing.feature_groups.data_operations.integration import load_group_implementations
+
+        class _ProbeNoManifestGroup(OperationFeatureGroup):
+            pass
+
+        try:
+            assert f"{_ProbeNoManifestGroup.__module__.rsplit('.', 1)[0]}.manifest" not in sys.modules
+            load_group_implementations(_ProbeNoManifestGroup)
+        finally:
+            del _ProbeNoManifestGroup
+            gc.collect()
+        assert not [c.__name__ for c in OperationFeatureGroup.__subclasses__() if c.__name__ == "_ProbeNoManifestGroup"]
+
+    def test_import_error_inside_a_manifest_is_not_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the manifest module itself may be missing; a failing import inside it must surface."""
+        from mloda.provider import OperationFeatureGroup
+
+        from mloda.testing.feature_groups.data_operations.integration import load_group_implementations
+
+        package = tmp_path / "probe_manifest_pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "manifest.py").write_text("import probe_manifest_missing_dependency\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        class _ProbeBrokenManifestGroup(OperationFeatureGroup):
+            pass
+
+        _ProbeBrokenManifestGroup.__module__ = "probe_manifest_pkg.base"
+        try:
+            with pytest.raises(ModuleNotFoundError, match="probe_manifest_missing_dependency"):
+                load_group_implementations(_ProbeBrokenManifestGroup)
+        finally:
+            del _ProbeBrokenManifestGroup
+            for name in ("probe_manifest_pkg", "probe_manifest_pkg.manifest"):
+                sys.modules.pop(name, None)
+            gc.collect()
+
+
+# -- CapabilityHookTestMixin guard ---------------------------------------------
+
+
+def _capability_host(impl: Any) -> Any:
+    from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
+
+    from mloda.testing.feature_groups.data_operations.mixins.capability import CapabilityHookTestMixin
+
+    class _CapabilityHost(CapabilityHookTestMixin):
+        @classmethod
+        def implementation_class(cls) -> Any:
+            return impl
+
+        @classmethod
+        def compute_framework_class(cls) -> Any:
+            return PyArrowTable
+
+    return _CapabilityHost()
+
+
+def test_capability_hook_rejects_fails_for_an_accepts_override_without_probes() -> None:
+    def check(_: Any, impl: Any) -> None:
+        try:
+            with pytest.raises(AssertionError, match="accepts"):
+                _capability_host(impl).test_mixin_capability_hook_rejects()
+        except pytest.skip.Exception:
+            pytest.fail("guard skipped instead of asserting for an accepts() override without probes")
+
+    _with_probe_impl(check, accepts=lambda cls, feature_name, options: False)
+
+
+def test_capability_hook_rejects_skips_an_unrestricted_implementation_without_probes() -> None:
+    def check(_: Any, impl: Any) -> None:
+        with pytest.raises(pytest.skip.Exception):
+            _capability_host(impl).test_mixin_capability_hook_rejects()
+
+    _with_probe_impl(check)

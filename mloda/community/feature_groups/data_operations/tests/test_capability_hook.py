@@ -43,54 +43,47 @@ class TestResolveFeatureIntegration:
         family (matching string-based with empty Options) is the integration probe
         for the SQLite-rejects-median capability.
 
-        Both queries scope via ``feature_group=`` to a concrete backend: without it, the shared,
-        unrestricted base class is also a matching candidate and resolve_feature reports an
-        ambiguous "Multiple feature groups found" instead of resolving to either backend. Both
-        also pass a restricted ``enabled_feature_groups`` plugin_collector so an unrelated broken
-        class from another test module can't fail the whole environment build.
+        The query scopes via ``feature_group=`` to the scalar group and passes a restricted
+        ``enabled_feature_groups`` plugin_collector so an unrelated broken class from another test
+        module can't fail the whole environment build.
         """
         pytest.importorskip("pandas")
         from mloda.steward import resolve_feature
         from mloda.user import PluginCollector
+        from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
+        from mloda_plugins.compute_framework.base_implementations.sqlite.sqlite_framework import SqliteFramework
 
-        from mloda.community.feature_groups.data_operations.row_preserving.scalar_aggregate.pandas_scalar_aggregate import (
-            PandasScalarAggregate,
+        from mloda.community.feature_groups.data_operations.row_preserving.scalar_aggregate.base import (
+            ScalarAggregateFeatureGroup,
         )
-        from mloda.community.feature_groups.data_operations.row_preserving.scalar_aggregate.sqlite_scalar_aggregate import (
-            SqliteScalarAggregate,
-        )
+        from mloda.testing.feature_groups.data_operations.integration import load_group_implementations
 
-        plugin_collector = PluginCollector.enabled_feature_groups({PandasScalarAggregate, SqliteScalarAggregate})
+        group = ScalarAggregateFeatureGroup
+        load_group_implementations(group)
+        plugin_collector = PluginCollector.enabled_feature_groups({group})
 
-        # SqliteScalarAggregate matches by name but supports_compute_framework rejects median for
-        # its own (only) framework, SqliteFramework, so no candidate remains and the elimination
-        # text names the rejected framework.
-        sqlite_result = resolve_feature(
-            "value__median_scalar", feature_group=SqliteScalarAggregate, plugin_collector=plugin_collector
-        )
-        assert sqlite_result.feature_group is None
-        assert sqlite_result.error is not None
-        assert "SqliteFramework" in sqlite_result.error
+        # The one group matches by name; its Implementations decide per framework. SQLite does not
+        # support median, Pandas does.
+        assert group.supports_compute_framework("value__median_scalar", Options(), SqliteFramework) is False
+        assert group.supports_compute_framework("value__median_scalar", Options(), PandasDataFrame) is True
+        assert group.supports_compute_framework("value__sum_scalar", Options(), SqliteFramework) is True
 
-        # PandasScalarAggregate has no such restriction and resolves cleanly.
-        pandas_result = resolve_feature(
-            "value__median_scalar", feature_group=PandasScalarAggregate, plugin_collector=plugin_collector
-        )
-        assert pandas_result.feature_group is PandasScalarAggregate
-        assert "PandasDataFrame" in pandas_result.supported_compute_frameworks
-        assert pandas_result.unsupported_compute_frameworks == []
+        result = resolve_feature("value__median_scalar", feature_group=group, plugin_collector=plugin_collector)
+        assert result.feature_group is group
+        assert "PandasDataFrame" in result.supported_compute_frameworks
+        assert "SqliteFramework" in result.unsupported_compute_frameworks
 
     def test_capability_split_rejects_sqlite_for_median_rolling_frame(self) -> None:
-        """Each backend's own supports_compute_framework must reject/accept a median rolling frame.
+        """The frame group's supports_compute_framework must reject/accept a median rolling frame per framework.
 
         resolve_feature cannot be the probe here: frame aggregate's
         ``match_feature_group_criteria`` requires partition_by/order_by, which are absent
         under the empty Options resolve_feature evaluates matching with (the same reason the
         median-scalar test above uses the scalar family instead of the group-by family). The
         removed ``split_frameworks_by_capability`` used to batch this same per-class check for a
-        caller-supplied list of candidates; this test calls each class's own
-        ``supports_compute_framework`` directly against its own (single) compute framework
-        instead, which is the exact per-feature hook that helper batched.
+        caller-supplied list of candidates; this test calls the group's
+        ``supports_compute_framework`` directly per compute framework, which is the exact
+        per-feature hook that helper batched.
         """
         pytest.importorskip("pandas")
         pytest.importorskip("duckdb")
@@ -99,18 +92,15 @@ class TestResolveFeatureIntegration:
         from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
         from mloda_plugins.compute_framework.base_implementations.sqlite.sqlite_framework import SqliteFramework
 
-        from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.duckdb_frame_aggregate import (
-            DuckdbFrameAggregate,
+        from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.base import (
+            FrameAggregateFeatureGroup,
         )
-        from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.pandas_frame_aggregate import (
-            PandasFrameAggregate,
-        )
-        from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.sqlite_frame_aggregate import (
-            SqliteFrameAggregate,
-        )
+        from mloda.testing.feature_groups.data_operations.integration import load_group_implementations
 
         feature_name = "value__median_rolling_3"
 
-        assert SqliteFrameAggregate.supports_compute_framework(feature_name, Options(), SqliteFramework) is False
-        assert PandasFrameAggregate.supports_compute_framework(feature_name, Options(), PandasDataFrame) is True
-        assert DuckdbFrameAggregate.supports_compute_framework(feature_name, Options(), DuckDBFramework) is True
+        group = FrameAggregateFeatureGroup
+        load_group_implementations(group)
+        assert group.supports_compute_framework(feature_name, Options(), SqliteFramework) is False
+        assert group.supports_compute_framework(feature_name, Options(), PandasDataFrame) is True
+        assert group.supports_compute_framework(feature_name, Options(), DuckDBFramework) is True

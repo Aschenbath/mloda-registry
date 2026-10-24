@@ -18,7 +18,7 @@ Usage::
 
         @classmethod
         def feature_group_class(cls):
-            return PyArrowWindowAggregation
+            return WindowAggregationFeatureGroup
 
         @classmethod
         def data_creator_class(cls):
@@ -29,6 +29,7 @@ Usage::
 
 from __future__ import annotations
 
+import importlib
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -42,6 +43,27 @@ from mloda.testing.feature_groups.data_operations.helpers import (
     extract_column,
     result_column_names,
 )
+
+
+def load_group_implementations(group: Any) -> None:
+    """Import the manifest next to an operation group, which loads every installed Implementation of it.
+
+    A package without a manifest module is left alone; any other import error is raised.
+    """
+    if isinstance(group, type) and issubclass(group, OperationFeatureGroup):
+        manifest = group.__module__.rsplit(".", 1)[0] + ".manifest"
+        try:
+            importlib.import_module(manifest)
+        except ModuleNotFoundError as exc:
+            if exc.name != manifest:
+                raise
+
+
+def enabled_with_implementations(classes: set[Any]) -> PluginCollector:
+    """``PluginCollector.enabled_feature_groups(classes)`` after loading the Implementations of any operation group."""
+    for cls in classes:
+        load_group_implementations(cls)
+    return PluginCollector.enabled_feature_groups(classes)
 
 
 class DataOpsIntegrationTestBase(ABC):
@@ -66,7 +88,7 @@ class DataOpsIntegrationTestBase(ABC):
     @classmethod
     @abstractmethod
     def feature_group_class(cls) -> Any:
-        """Return the feature group implementation class (e.g. PyArrowWindowAggregation)."""
+        """Return the feature group implementation class (e.g. WindowAggregationFeatureGroup)."""
 
     @classmethod
     @abstractmethod
@@ -145,6 +167,11 @@ class DataOpsIntegrationTestBase(ABC):
         """Relative tolerance for pytest.approx. Default: 1e-3."""
         return 1e-3
 
+    @classmethod
+    def pipeline_compute_frameworks(cls) -> list[type]:
+        """Compute frameworks enabled for the pipeline runs. Default: only ``compute_framework_class()``."""
+        return [cls.compute_framework_class()]
+
     # -- Helpers --------------------------------------------------------------
 
     def _make_feature(self, name: str, options_context: dict[str, Any]) -> Feature:
@@ -153,17 +180,16 @@ class DataOpsIntegrationTestBase(ABC):
 
     def _plugin_collector(self, creator: type | None = None) -> PluginCollector:
         """Create a PluginCollector with the feature group and data creator (or ``creator``) enabled."""
-        return PluginCollector.enabled_feature_groups(
-            {creator or self.data_creator_class(), self.feature_group_class()}
-        )
+        return enabled_with_implementations({creator or self.data_creator_class(), self.feature_group_class()})
 
     def _run_single_feature(self, name: str, options_context: dict[str, Any], creator: type | None = None) -> Any:
         """Run a single feature through the pipeline and return the framework result holding it."""
         feature = self._make_feature(name, options_context)
         results = mloda.run_all(
             [feature],
-            compute_frameworks=[self.compute_framework_class()],
+            compute_frameworks=self.pipeline_compute_frameworks(),
             plugin_collector=self._plugin_collector(creator) if creator is not None else self._plugin_collector(),
+            output_framework=self.compute_framework_class(),
         )
         assert len(results) >= 1
 
@@ -239,8 +265,9 @@ class DataOpsIntegrationTestBase(ABC):
         with pytest.raises(ValueError):
             mloda.run_all(
                 [feature],
-                compute_frameworks=[self.compute_framework_class()],
+                compute_frameworks=self.pipeline_compute_frameworks(),
                 plugin_collector=plugin_collector,
+                output_framework=self.compute_framework_class(),
             )
 
     def test_family_base_is_not_selected_without_an_implementation(self) -> None:

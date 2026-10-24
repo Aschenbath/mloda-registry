@@ -8,15 +8,21 @@ import re
 from typing import Any
 
 import pytest
-from mloda.provider import is_match_abort
+from mloda.provider import FeatureChainParserMixin, FeatureGroup, FeatureSet, OperationFeatureGroup, is_match_abort
 from mloda.user import DataType, Feature, Options
 
-from mloda.community.feature_groups.data_operations.base import always_required
+from mloda.community.feature_groups.data_operations.base import KeyColumnInputsMixin, always_required
 from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.base import (
     _AGGREGATION_TYPES,
     FrameAggregateFeatureGroup,
 )
+from mloda.testing.feature_groups.data_operations.helpers import load_implementation, make_feature_set
 from mloda.testing.feature_groups.data_operations.match_validation import MatchValidationTestBase, TokenCase
+from mloda.testing.feature_groups.data_operations.operation_group import ImplSpec, OperationGroupTestBase
+from mloda.testing.feature_groups.data_operations.row_preserving.frame_aggregate.frame_aggregate import (
+    config_frame_options,
+    time_frame_options,
+)
 
 
 class TestPatternParsing:
@@ -933,3 +939,195 @@ class TestFrameAggregateMatchValidation(MatchValidationTestBase):
             params["order_by"],
             params["frame_size"],
         ]
+
+
+_PACKAGE = "mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate"
+_ROLLING_OPTIONS = Options(context={"partition_by": ["region"], "order_by": "ts"})
+
+
+class TestOperationGroupShape:
+    """Frame-specific value pins; the generic shape checks live in TestFrameAggregateOperationGroup."""
+
+    def test_group_is_an_operation_group_keeping_its_mixins(self) -> None:
+        assert issubclass(FrameAggregateFeatureGroup, OperationFeatureGroup)
+        mro = FrameAggregateFeatureGroup.__mro__
+        assert mro.index(KeyColumnInputsMixin) < mro.index(FeatureGroup)
+        assert mro.index(FeatureChainParserMixin) < mro.index(FeatureGroup)
+
+    def test_subtypes_is_shape_b_over_the_aggregation_universe(self) -> None:
+        declaration = FrameAggregateFeatureGroup.SUBTYPES
+        assert declaration is not None
+        assert declaration.resolver is not None
+        assert declaration.universe == frozenset({"sum", "avg", "count", "min", "max", "std", "var", "median"})
+
+
+_ENGINE = "mloda_plugins.compute_framework.base_implementations"
+
+
+class TestFrameAggregateOperationGroup(OperationGroupTestBase):
+    @classmethod
+    def group_class(cls) -> Any:
+        return FrameAggregateFeatureGroup
+
+    @classmethod
+    def backend_package(cls) -> str:
+        return "mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate"
+
+    @classmethod
+    def implementations(cls) -> list[ImplSpec]:
+        return [
+            ImplSpec(
+                "pandas",
+                "pandas_frame_aggregate",
+                "PandasFrameAggregate",
+                f"{_ENGINE}.pandas.dataframe",
+                "PandasDataFrame",
+                divergent=frozenset({"sum", "avg", "count", "std", "var"}),
+                dependency="pandas",
+            ),
+            ImplSpec(
+                "polars_lazy",
+                "polars_lazy_frame_aggregate",
+                "PolarsLazyFrameAggregate",
+                f"{_ENGINE}.polars.lazy_dataframe",
+                "PolarsLazyDataFrame",
+                dependency="polars",
+            ),
+            ImplSpec(
+                "duckdb",
+                "duckdb_frame_aggregate",
+                "DuckdbFrameAggregate",
+                f"{_ENGINE}.duckdb.duckdb_framework",
+                "DuckDBFramework",
+                dependency="duckdb",
+            ),
+            ImplSpec(
+                "sqlite",
+                "sqlite_frame_aggregate",
+                "SqliteFrameAggregate",
+                f"{_ENGINE}.sqlite.sqlite_framework",
+                "SqliteFramework",
+                supported=frozenset({"sum", "avg", "count", "min", "max"}),
+                divergent=frozenset({"sum", "avg", "count"}),
+            ),
+            ImplSpec(
+                "python_dict",
+                "python_dict_frame_aggregate",
+                "PythonDictFrameAggregate",
+                f"{_ENGINE}.python_dict.python_dict_framework",
+                "PythonDictFramework",
+            ),
+        ]
+
+    @classmethod
+    def subtype_key(cls) -> str | None:
+        return None
+
+    @classmethod
+    def loop_method(cls) -> str:
+        return "aggregate"
+
+    @classmethod
+    def compute_method(cls) -> str:
+        return "_compute_frame"
+
+    @classmethod
+    def probe_feature_set(cls) -> FeatureSet:
+        return make_feature_set("value_int__sum_rolling_3", ["region"], "value_int")
+
+    @classmethod
+    def name_probes(cls) -> list[tuple[str, str]]:
+        return [
+            ("x__sum_rolling_3", "sum"),
+            ("x__avg_7_day_window", "avg"),
+            ("x__cumsum", "sum"),
+            ("x__expanding_max", "max"),
+        ]
+
+    @classmethod
+    def option_probes(cls) -> list[tuple[str, Options, str]]:
+        return [("my_result", config_frame_options("median", "rolling"), "median")]
+
+    def test_unmatched_name_resolves_to_no_subtype(self) -> None:
+        assert FrameAggregateFeatureGroup.resolve_subtype("plain_feature", Options()) is None
+
+
+class TestTimeUnits:
+    """Time units are declared per Implementation; supported and divergent pins live in TestFrameAggregateOperationGroup."""
+
+    @pytest.mark.parametrize(
+        ("module", "name"),
+        [
+            ("pandas_frame_aggregate", "PandasFrameAggregate"),
+            ("sqlite_frame_aggregate", "SqliteFrameAggregate"),
+        ],
+    )
+    def test_time_units_live_on_the_implementation(self, module: str, name: str) -> None:
+        units = load_implementation(_PACKAGE, module, name).SUPPORTED_TIME_UNITS
+        assert set(units) == {"second", "minute", "hour", "day", "week"}
+
+
+class TestImplementationAccepts:
+    """Per-framework narrowing of frame features is the Implementation's ``accepts``."""
+
+    @pytest.mark.parametrize(
+        ("module", "name"),
+        [
+            ("pandas_frame_aggregate", "PandasFrameAggregate"),
+            ("sqlite_frame_aggregate", "SqliteFrameAggregate"),
+        ],
+    )
+    def test_month_and_year_windows_are_rejected(self, module: str, name: str) -> None:
+        impl = load_implementation(_PACKAGE, module, name)
+        assert not impl.accepts("value__sum_1_month_window", _ROLLING_OPTIONS)
+        assert not impl.accepts("value__sum_1_year_window", _ROLLING_OPTIONS)
+        assert not impl.accepts("value_time_frame", time_frame_options("month"))
+        assert not impl.accepts("value_time_frame", time_frame_options("year"))
+
+    @pytest.mark.parametrize(
+        ("module", "name"),
+        [
+            ("pandas_frame_aggregate", "PandasFrameAggregate"),
+            ("sqlite_frame_aggregate", "SqliteFrameAggregate"),
+        ],
+    )
+    def test_day_and_week_windows_are_accepted(self, module: str, name: str) -> None:
+        impl = load_implementation(_PACKAGE, module, name)
+        assert impl.accepts("value__sum_3_day_window", _ROLLING_OPTIONS)
+        assert impl.accepts("value__sum_1_week_window", _ROLLING_OPTIONS)
+        assert impl.accepts("value_time_frame", time_frame_options("day"))
+        assert impl.accepts("value_time_frame", time_frame_options("week"))
+
+    @pytest.mark.parametrize("agg_type", ["std", "var", "median"])
+    @pytest.mark.parametrize("frame_type", ["cumulative", "expanding"])
+    def test_polars_rejects_std_var_median_on_cumulative_and_expanding(self, agg_type: str, frame_type: str) -> None:
+        impl = load_implementation(_PACKAGE, "polars_lazy_frame_aggregate", "PolarsLazyFrameAggregate")
+        assert not impl.accepts("value_frame", config_frame_options(agg_type, frame_type))
+
+    @pytest.mark.parametrize(
+        "feature_name", ["value__cumstd", "value__cumvar", "value__cummedian", "value__expanding_std"]
+    )
+    def test_polars_rejects_cumulative_names(self, feature_name: str) -> None:
+        impl = load_implementation(_PACKAGE, "polars_lazy_frame_aggregate", "PolarsLazyFrameAggregate")
+        assert not impl.accepts(feature_name, _ROLLING_OPTIONS)
+
+    @pytest.mark.parametrize("agg_type", ["std", "var", "median"])
+    def test_polars_accepts_std_var_median_on_rolling_and_time(self, agg_type: str) -> None:
+        impl = load_implementation(_PACKAGE, "polars_lazy_frame_aggregate", "PolarsLazyFrameAggregate")
+        assert impl.accepts("value_frame", config_frame_options(agg_type, "rolling"))
+        assert impl.accepts(f"value__{agg_type}_rolling_3", _ROLLING_OPTIONS)
+        assert impl.accepts(f"value__{agg_type}_7_day_window", _ROLLING_OPTIONS)
+
+    @pytest.mark.parametrize(
+        ("module", "name"),
+        [
+            ("duckdb_frame_aggregate", "DuckdbFrameAggregate"),
+            ("python_dict_frame_aggregate", "PythonDictFrameAggregate"),
+        ],
+    )
+    def test_unrestricted_implementations_accept_everything(self, module: str, name: str) -> None:
+        impl = load_implementation(_PACKAGE, module, name)
+        assert impl.accepts("value__sum_1_month_window", _ROLLING_OPTIONS)
+        assert impl.accepts("value__cumstd", _ROLLING_OPTIONS)
+        assert impl.accepts("value_time_frame", time_frame_options("year"))
+        assert impl.accepts("value_frame", config_frame_options("median", "cumulative"))
