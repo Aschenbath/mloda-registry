@@ -32,6 +32,10 @@ from mloda.community.feature_groups.data_operations.aggregation.pyarrow_aggregat
 )
 from mloda.testing.data_creator.pandas import PandasDataOpsTestDataCreator
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
+from mloda.testing.feature_groups.data_operations.aggregation.aggregation import (
+    EXPECTED_AVG_BY_REGION,
+    EXPECTED_SUM_BY_REGION,
+)
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
 from mloda.testing.feature_groups.data_operations.mixins.mask_integration import MaskIntegrationTestMixin
 from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
@@ -140,9 +144,10 @@ class TestAggregationIntegration(
 class TestIntegrationAdditionalAggTypes:
     """Test additional aggregation types through the full mloda pipeline.
 
-    Aggregation reduces rows, so each feature must be requested
-    in a separate run_all call (mloda cannot merge different row-count
-    outputs without explicit Links).
+    Aggregation reduces rows. Several aggregations with the same ``partition_by``
+    can share one run_all call (they are computed together into one result);
+    aggregations with different ``partition_by`` need separate run_all calls
+    (mloda cannot merge different row-count outputs without explicit Links).
     """
 
     def test_min_agg_through_pipeline(self) -> None:
@@ -402,14 +407,39 @@ class TestIntegrationSeveralFrameworks:
 
 
 class TestIntegrationMultipleFeatures:
-    """Test multiple aggregation features in separate pipeline runs.
+    """Test multiple aggregation features, in separate pipeline runs and in one run.
 
-    Aggregation reduces rows, so each feature must be requested
-    in a separate run_all call (mloda cannot merge different row-count
-    outputs without explicit Links). These tests verify that different
+    Features that share partition_by are aggregated together from the original
+    input in a single run_all call, giving one result table. Features may also
+    be requested in separate run_all calls. These tests verify that different
     aggregation types produce consistent, correct results from the
-    same source data.
+    same source data either way.
     """
+
+    def test_sum_and_avg_in_one_run(self) -> None:
+        """Sum and avg of value_int by region in ONE run_all call share one result table."""
+        plugin_collector = PluginCollector.enabled_feature_groups(
+            {PyArrowDataOpsTestDataCreator, AggregationFeatureGroup}
+        )
+        options = Options(context={"partition_by": ["region"]})
+        results = mloda.run_all(
+            [Feature("value_int__sum_agg", options=options), Feature("value_int__avg_agg", options=options)],
+            compute_frameworks=[PyArrowTable],
+            plugin_collector=plugin_collector,
+        )
+
+        tables = [
+            t
+            for t in results
+            if isinstance(t, pa.Table) and {"value_int__sum_agg", "value_int__avg_agg"} <= set(t.column_names)
+        ]
+        assert len(tables) == 1
+        table = tables[0]
+        assert table.num_rows == 4
+        assert sorted(table.column("value_int__sum_agg").to_pylist()) == sorted(EXPECTED_SUM_BY_REGION.values())
+        assert sorted(table.column("value_int__avg_agg").to_pylist()) == pytest.approx(
+            sorted(EXPECTED_AVG_BY_REGION.values()), rel=1e-3
+        )
 
     def test_sum_and_avg_consistent(self) -> None:
         """Run sum and avg separately and verify both produce correct results."""

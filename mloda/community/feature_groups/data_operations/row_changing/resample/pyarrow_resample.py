@@ -16,8 +16,10 @@ import pyarrow.compute as pc
 from mloda.provider import ComputeFramework, FeatureSet, Implementation
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
+from mloda.community.feature_groups.data_operations.pyarrow_helpers import rename_aggregates_by_position
 from mloda.community.feature_groups.data_operations.row_changing.resample.base import (
     RESAMPLE_AGGS,
+    ResampleAgg,
     ResampleFeatureGroup,
 )
 
@@ -47,26 +49,23 @@ class PyArrowResample(Implementation[ResampleFeatureGroup]):
     def _compute_resample(
         cls,
         data: pa.Table,
-        feature_name: str,
-        source_col: str,
+        aggs: list[ResampleAgg],
         time_column: str,
         partition_by: list[str],
         n: int,
         unit: str,
-        agg: str,
     ) -> pa.Table:
-        if agg not in _PA_AGG_FUNCS:
-            raise ValueError(f"Unsupported resample agg {agg!r} for PyArrow; supported: {sorted(RESAMPLE_AGGS)}.")
+        for spec in aggs:
+            if spec.agg not in _PA_AGG_FUNCS:
+                raise ValueError(
+                    f"Unsupported resample agg {spec.agg!r} for PyArrow; supported: {sorted(RESAMPLE_AGGS)}."
+                )
 
         # Floor the time column in place (bucket start keeps the original name).
         bucket = pc.floor_temporal(data.column(time_column), multiple=n, unit=unit)
         data = data.set_column(data.schema.get_field_index(time_column), time_column, bucket)
 
         keys = [*partition_by, time_column]
-        pa_func = _PA_AGG_FUNCS[agg]
-        grouped = data.group_by(keys).aggregate([(source_col, pa_func)])
+        grouped = data.group_by(keys).aggregate([(spec.source_col, _PA_AGG_FUNCS[spec.agg]) for spec in aggs])
 
-        # Rename the auto-generated aggregate column to the feature name.
-        auto_col = f"{source_col}_{pa_func}"
-        names = [feature_name if c == auto_col else c for c in grouped.column_names]
-        return grouped.rename_columns(names)
+        return rename_aggregates_by_position(grouped, keys, [spec.feature_name for spec in aggs])

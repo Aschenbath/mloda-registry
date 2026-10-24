@@ -65,7 +65,11 @@ from mloda.provider import FeatureSet
 from mloda.user import Feature, Options
 
 from mloda.testing.feature_groups.data_operations.base import DataOpsTestBase
-from mloda.testing.feature_groups.data_operations.helpers import calculate_with, make_feature_set
+from mloda.testing.feature_groups.data_operations.helpers import (
+    calculate_with,
+    make_feature_set,
+    make_multi_feature_set,
+)
 from mloda.testing.feature_groups.data_operations.helpers import extract_column as _extract_column
 from mloda.testing.feature_groups.data_operations.mixins.input_validation import (
     InputValidationCase,
@@ -598,6 +602,58 @@ class ResampleTestBase(InputValidationTestMixin, OutputContractTestMixin, NanPol
         result = calculate_with(self.implementation_class(), self.test_data, fs)
         result_map = self._build_resample_map(result, "value__resample_1_hour_mean", "ts", ["region"])
         self._assert_map_equals(result_map, EXPECTED_1_HOUR_MEAN, use_approx=True)
+
+    # -- Several features in one FeatureSet ----------------------------------
+
+    @staticmethod
+    def _multi_feature_set(feature_names: list[str], partition_by: list[str] | list[list[str]]) -> FeatureSet:
+        """Build a FeatureSet; a list of lists gives each feature its own partition_by."""
+        specs: list[tuple[str, dict[str, Any]]] = []
+        for i, name in enumerate(feature_names):
+            part = partition_by[i] if partition_by and isinstance(partition_by[0], list) else partition_by
+            specs.append((name, {"time_column": "ts", "partition_by": part}))
+        return make_multi_feature_set(specs)
+
+    def test_multiple_features_same_grid(self) -> None:
+        """Features sharing a bucket grid are aggregated together from the original input."""
+        names = ["value__resample_1_hour_mean", "value__resample_1_hour_sum", "value__resample_1_hour_count"]
+        fs = self._multi_feature_set(names, ["region"])
+        result = calculate_with(self.implementation_class(), self.test_data, fs)
+
+        assert self.get_row_count(result) == len(EXPECTED_1_HOUR_MEAN)
+        expected = [
+            (names[0], EXPECTED_1_HOUR_MEAN, True),
+            (names[1], EXPECTED_1_HOUR_SUM, True),
+            (names[2], EXPECTED_1_HOUR_COUNT, False),
+        ]
+        for name, exp, approx in expected:
+            result_map = self._build_resample_map(result, name, "ts", ["region"])
+            self._assert_map_equals(result_map, exp, use_approx=approx)
+
+    def test_empty_feature_set_returns_input(self) -> None:
+        """A FeatureSet without features returns the input unchanged and never calls compute_resample."""
+        from mloda.community.feature_groups.data_operations.row_changing.resample.base import ResampleFeatureGroup
+
+        def fail(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("compute_resample must not run for an empty FeatureSet")
+
+        result = ResampleFeatureGroup.resample(self.test_data, FeatureSet(), compute_resample=fail)
+        assert result is self.test_data
+
+    @pytest.mark.parametrize(
+        "names, partition_by",
+        [
+            (["value__resample_1_hour_mean", "value__resample_15_minute_mean"], [["region"], ["region"]]),
+            (["value__resample_1_hour_mean", "value__resample_1_hour_sum"], [["region"], []]),
+        ],
+        ids=["bucket_size", "partition_by"],
+    )
+    def test_mixed_bucket_grids_rejected(self, names: list[str], partition_by: list[list[str]]) -> None:
+        """Features with different bucket grids in one FeatureSet are rejected, naming the remedy."""
+        fs = self._multi_feature_set(names, partition_by)
+        with pytest.raises(ValueError, match=r"(?i)bucket") as exc_info:
+            calculate_with(self.implementation_class(), self.test_data, fs)
+        assert "run_all" in str(exc_info.value)
 
     # -- Cross-framework comparison (map-based vs PyArrow oracle) ------------
 
