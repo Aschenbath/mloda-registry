@@ -27,8 +27,12 @@ from mloda.provider import BaseInputData, ComputeFramework, DataCreator, Feature
 from mloda.user import Feature, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pandas.dataframe import PandasDataFrame
 
-from mloda.community.feature_groups.data_operations.row_preserving.sessionization.pandas_sessionization import (
-    PandasSessionization,
+# Loads the Implementations that serve the group.
+from mloda.community.feature_groups.data_operations.row_preserving.sessionization import (
+    manifest as _manifest,  # noqa: F401
+)
+from mloda.community.feature_groups.data_operations.row_preserving.sessionization.base import (
+    SessionizationFeatureGroup,
 )
 from mloda.testing.data_creator.base import column_selective
 
@@ -74,7 +78,9 @@ class SessionIntegrationDataCreator(FeatureGroup):
 
 def _session_values(name: str, context: dict[str, Any]) -> list[Any]:
     """Run a single sessionization feature on pandas through ``run_all``."""
-    plugin_collector = PluginCollector.enabled_feature_groups({SessionIntegrationDataCreator, PandasSessionization})
+    plugin_collector = PluginCollector.enabled_feature_groups(
+        {SessionIntegrationDataCreator, SessionizationFeatureGroup}
+    )
     feature = Feature(name, options=Options(context=context))
 
     results = mloda.run_all(
@@ -104,7 +110,7 @@ class TestSessionizationIntegration:
     def test_sessionize_with_column_selective_source(self) -> None:
         name = "ts__sessionize_30_minute"
         plugin_collector = PluginCollector.enabled_feature_groups(
-            {column_selective(SessionIntegrationDataCreator), PandasSessionization}
+            {column_selective(SessionIntegrationDataCreator), SessionizationFeatureGroup}
         )
         feature = Feature(name, options=Options(context={"order_by": "ts", "partition_by": ["user"]}))
 
@@ -120,9 +126,11 @@ class TestSessionizationMatchFeatureGroupCriteria:
     def test_valid_names_match(self) -> None:
         options = Options(context={"order_by": "ts", "partition_by": ["user"]})
         for name in ["ts__sessionize_30_minute", "event__sessionize_1_hour"]:
-            assert PandasSessionization.match_feature_group_criteria(name, options), f"expected {name} to match"
+            assert SessionizationFeatureGroup.match_feature_group_criteria(name, options), f"expected {name} to match"
 
     def test_invalid_names_do_not_match(self) -> None:
         options = Options(context={"order_by": "ts", "partition_by": ["user"]})
         for name in ["ts", "ts__sessionize", "ts__sessionize_30", "ts__sessionize_30_month"]:
-            assert not PandasSessionization.match_feature_group_criteria(name, options), f"expected {name} to NOT match"
+            assert not SessionizationFeatureGroup.match_feature_group_criteria(name, options), (
+                f"expected {name} to NOT match"
+            )

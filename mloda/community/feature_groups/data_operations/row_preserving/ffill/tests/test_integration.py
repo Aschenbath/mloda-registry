@@ -23,11 +23,14 @@ import pytest
 from mloda.user import Feature, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
-from mloda.community.feature_groups.data_operations.row_preserving.ffill.pyarrow_ffill import (
-    PyArrowFfill,
-)
+# Loads the Implementations that serve the group.
+from mloda.community.feature_groups.data_operations.row_preserving.ffill import manifest as _manifest  # noqa: F401
+from mloda.community.feature_groups.data_operations.row_preserving.ffill.base import FfillFeatureGroup
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+    OperationGroupIntegrationTestMixin,
+)
 
 # Forward-fill of ``value_float`` within each ``region`` partition, in timestamp
 # order. Region A: [1.5, 2.5, None->2.5, 0.0]; B: [-3.14, 5.5, 6.5, 7.5];
@@ -43,7 +46,7 @@ _VALUE_FLOAT_FFILL_WHOLE: list[Any] = [1.5, 2.5, 2.5, 0.0, -3.14, 5.5, 6.5, 7.5,
 _AMOUNT_FFILL_BY_REGION: list[Any] = [100.0, 100.0, 250.0, 75.0, 300.0, 0.0, 150.0, 150.0, 50.0, 200.0, 125.0, 80.0]
 
 
-class TestFfillIntegration(DataOpsIntegrationTestBase):
+class TestFfillIntegration(OperationGroupIntegrationTestMixin, DataOpsIntegrationTestBase):
     """Standard integration tests inherited from the base class.
 
     ffill uses name-based matching, so ``match_feature_group_criteria`` succeeds
@@ -54,7 +57,7 @@ class TestFfillIntegration(DataOpsIntegrationTestBase):
 
     @classmethod
     def feature_group_class(cls) -> type:
-        return PyArrowFfill
+        return FfillFeatureGroup
 
     @classmethod
     def data_creator_class(cls) -> type:
@@ -105,7 +108,7 @@ class TestFfillIntegration(DataOpsIntegrationTestBase):
     def test_match_rejects_missing_config(self) -> None:
         """Name-based: a non-pattern name without config must fail to match."""
         options = Options()
-        assert not PyArrowFfill.match_feature_group_criteria("my_custom_result", options)
+        assert not FfillFeatureGroup.match_feature_group_criteria("my_custom_result", options)
 
     @pytest.mark.parametrize(
         ("name", "options_context", "match"),
@@ -138,16 +141,16 @@ class TestFfillRequiredOrderBy:
     def test_name_path_missing_order_by_does_not_match(self) -> None:
         """Name path: a pattern name without order_by is a non-match."""
         options = Options(context={"partition_by": ["region"]})
-        assert not PyArrowFfill.match_feature_group_criteria("amount__ffill", options)
+        assert not FfillFeatureGroup.match_feature_group_criteria("amount__ffill", options)
 
     def test_name_path_with_order_by_matches(self) -> None:
         """Control: the same pattern name WITH order_by still matches."""
         options = Options(context={"partition_by": ["region"], "order_by": "timestamp"})
-        assert PyArrowFfill.match_feature_group_criteria("amount__ffill", options)
+        assert FfillFeatureGroup.match_feature_group_criteria("amount__ffill", options)
 
     def test_missing_order_by_rejected_at_discovery(self) -> None:
         """Engine level: missing order_by fails resolution, and the error names order_by, not compute."""
-        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, PyArrowFfill})
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, FfillFeatureGroup})
         feature = Feature(
             "value_float__ffill",
             options=Options(context={"partition_by": ["region"]}),
@@ -165,7 +168,7 @@ class TestIntegrationMultipleFeatures:
     """Run multiple ffill features in a single ``run_all`` call."""
 
     def test_two_ffill_features_together(self) -> None:
-        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, PyArrowFfill})
+        plugin_collector = PluginCollector.enabled_feature_groups({PyArrowDataOpsTestDataCreator, FfillFeatureGroup})
 
         f_value = Feature(
             "value_float__ffill",
