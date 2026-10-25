@@ -43,7 +43,7 @@ Once you open a Pull Request:
 2. They may request changes or ask clarifying questions
 3. If you haven't received a response after 7 days, feel free to ping the thread
 
-You don't need to open an issue or discuss beforehand—PRs can be submitted directly.
+You don't need to open an issue or discuss beforehand. PRs can be submitted directly.
 
 ### Acceptance Criteria
 
@@ -57,7 +57,7 @@ Your PR will be merged when:
 ### Review Feedback
 
 - Expect constructive feedback aimed at improving code quality
-- Changes may be requested before merge—this is normal
+- Changes may be requested before merge. This is normal
 - Discussion is encouraged; ask questions if something is unclear
 
 ### After Merge
