@@ -110,8 +110,8 @@ Tag code blocks by intent: ` ```python ` for runnable code, ` ```py ` for illust
 
 The non-plugin packages support discovery and testing:
 
-- `mloda.registry` — plugin discovery and search
-- `mloda.testing` — test utilities (e.g. `FeatureGroupTestBase`) for plugin development
+- `mloda.registry`: plugin discovery and search
+- `mloda.testing`: test utilities (e.g. `FeatureGroupTestBase`) for plugin development
 
 For the packaging and release machinery behind these, see [`docs/packaging.md`](docs/packaging.md) and [`docs/releasing.md`](docs/releasing.md).
 
