@@ -51,6 +51,7 @@ AGGREGATION_TYPES: dict[str, str] = {
 }
 
 
+# Released aggregation-family leaves subclass this alone, so it keeps FeatureGroup.
 class AggregationFeatureGroupBase(KeyColumnInputsMixin, FeatureChainParserMixin, FeatureGroup):
     AGGREGATION_TYPE = "aggregation_type"
 

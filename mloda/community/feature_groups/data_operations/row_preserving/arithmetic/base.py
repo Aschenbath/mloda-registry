@@ -18,10 +18,9 @@ PROPERTY_MAPPING). Per-backend numeric introspection lives in
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from typing import Any
 
-from mloda.provider import FeatureChainParser, FeatureChainParserMixin, FeatureGroup
+from mloda.provider import FeatureChainParser, FeatureChainParserMixin
 from mloda.user import Feature
 
 from mloda.community.feature_groups.data_operations.base import available_columns, op_token_value
@@ -32,7 +31,7 @@ ARITHMETIC_OP_NAMES: frozenset[str] = frozenset({"add", "subtract", "multiply", 
 SQL_ARITHMETIC_OPS: dict[str, str] = {"add": "+", "subtract": "-", "multiply": "*", "divide": "/"}
 
 
-class ArithmeticFeatureGroupBase(FeatureChainParserMixin, FeatureGroup):
+class ArithmeticFeatureGroupBase(FeatureChainParserMixin):
     ARITHMETIC_OP = "arithmetic_op"
 
     #: Operation label used in the numeric-source rejection message.
@@ -75,14 +74,9 @@ class ArithmeticFeatureGroupBase(FeatureChainParserMixin, FeatureGroup):
         raise ValueError(f"Source column {source_col!r} must be numeric for {cls.OPERATION_LABEL}; got {got}.")
 
     @classmethod
-    @abstractmethod
     def _non_numeric_descriptor(cls, data: Any, source_col: str) -> object | None:
-        """Return a native dtype/affinity descriptor when ``source_col`` is NOT numeric.
-
-        Backend-specific hook; implemented per backend mixin. Implementations
-        return a native dtype, affinity string, or any other descriptor when
-        the column is not numeric, and ``None`` when it is numeric.
-        """
+        """Return a native descriptor when ``source_col`` is NOT numeric, else ``None``; per-backend hook."""
+        raise NotImplementedError
 
     @classmethod
     def _assert_source_column_is_numeric(cls, data: Any, source_col: str) -> None:
