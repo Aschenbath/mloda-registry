@@ -29,7 +29,9 @@ from mloda.testing.feature_groups.data_operations.mixins.case_parametrization im
 class ImplSpec(NamedTuple):
     """One Implementation of the group and what it must declare.
 
-    ``supported`` None means unrestricted. ``dependency`` is the optional package that gates the manifest entry.
+    ``module`` is the module that defines the Implementation. ``supported`` None means unrestricted.
+    ``dependency`` is the optional package that gates the manifest entry and turns a missing backend into a skip
+    (without it the import must succeed).
     """
 
     id: str
@@ -97,6 +99,21 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
         """Subtypes that are aliases and so must be divergent together."""
         return []
 
+    @classmethod
+    def universe(cls) -> frozenset[str] | None:
+        """The exact ``subtype_universe()``; ``frozenset()`` asserts ``SUBTYPES is None``. Default: not pinned."""
+        return None
+
+    @classmethod
+    def unresolved_probes(cls) -> list[tuple[str, Options]]:
+        """(feature name, options) pairs that must resolve to no subtype."""
+        return []
+
+    @classmethod
+    def mixins(cls) -> tuple[type, ...] | None:
+        """The mixins directly after the group, followed by OperationFeatureGroup and then FeatureGroup. Default: skip."""
+        return None
+
     # -- Plumbing ---------------------------------------------------------------
 
     _case_fixtures: ClassVar[dict[str, str]] = {"impl_id": "implementation_ids"}
@@ -111,8 +128,12 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
 
     @classmethod
     def _implementation(cls, spec: ImplSpec) -> Any:
-        """The Implementation class; skips when its optional backend is not installed."""
-        return getattr(pytest.importorskip(f"{cls.backend_package()}.{spec.module}"), spec.name)
+        """The Implementation class; skips only when its declared dependency is missing, else imports strictly."""
+        path = f"{cls.backend_package()}.{spec.module}"
+        if spec.dependency:
+            pytest.importorskip(spec.dependency)
+        module = importlib.import_module(path)
+        return getattr(module, spec.name)
 
     # -- Group shape ------------------------------------------------------------
 
@@ -127,9 +148,21 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
         assert mro.index(FeatureChainParserMixin) < mro.index(OperationFeatureGroup)
 
     def test_group_declares_the_subtype_key(self) -> None:
+        if self.universe() == frozenset():
+            assert self.group_class().SUBTYPES is None
+            return
         declaration = self.group_class().SUBTYPES
         assert declaration is not None
         assert declaration.key == self.subtype_key()
+        if self.subtype_key() is None:
+            assert declaration.resolver is not None
+
+    def test_group_mro_puts_the_mixins_before_the_operation_group(self) -> None:
+        mixins = self.mixins()
+        if mixins is None:
+            pytest.skip("no mixins declared")
+        mro = self.group_class().__mro__
+        assert mro[1 : len(mixins) + 3] == (*mixins, OperationFeatureGroup, FeatureGroup)
 
     def test_group_owns_the_loop_and_no_per_framework_compute(self) -> None:
         assert callable(getattr(self.group_class(), self.loop_method()))
@@ -150,6 +183,7 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
         assert not issubclass(impl, FeatureGroup)
         assert impl.feature_group is self.group_class()
         assert impl.compute_framework is framework
+        assert impl.__module__ == f"{self.backend_package()}.{spec.module}"
 
     def test_implementation_keeps_its_compute_hook(self, impl_id: str) -> None:
         spec = self._spec(impl_id)
@@ -186,6 +220,11 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
         for first, second in self.alias_pairs():
             assert (first in divergent) == (second in divergent)
 
+    def test_universe_is_the_declared_set(self) -> None:
+        if self.universe() is None:
+            pytest.skip("no universe declared")
+        assert self.group_class().subtype_universe() == self.universe()
+
     # -- Subtype resolution -----------------------------------------------------
 
     def test_resolves_from_the_feature_name(self) -> None:
@@ -195,6 +234,10 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
     def test_resolves_from_the_config_option(self) -> None:
         for name, options, subtype in self.option_probes():
             assert self.group_class().resolve_subtype(name, options) == subtype
+
+    def test_unresolvable_probes_resolve_to_no_subtype(self) -> None:
+        for name, options in self.unresolved_probes():
+            assert self.group_class().resolve_subtype(name, options) is None
 
     # -- Manifest ---------------------------------------------------------------
 

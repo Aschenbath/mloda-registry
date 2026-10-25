@@ -454,6 +454,28 @@ def test_pipeline_compute_frameworks_defaults_to_the_compute_framework_class() -
     assert _IntegrationStub.pipeline_compute_frameworks() == [_Marker]
 
 
+def test_nan_is_null_defaults_to_false() -> None:
+    from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
+
+    assert DataOpsIntegrationTestBase.nan_is_null() is False
+
+
+def test_routing_frameworks_defaults_to_the_pipeline_frameworks() -> None:
+    from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
+        OperationGroupIntegrationTestMixin,
+    )
+
+    class _Marker:
+        pass
+
+    class _RoutingStub(OperationGroupIntegrationTestMixin):
+        @classmethod
+        def pipeline_compute_frameworks(cls) -> list[type]:
+            return [_Marker]
+
+    assert _RoutingStub.routing_frameworks() == [_Marker]
+
+
 class TestEnabledWithImplementations:
     """The integration helper loads a group's Implementations through its manifest, so tests need no ad hoc imports."""
 
@@ -572,3 +594,20 @@ def test_capability_hook_rejects_skips_an_unrestricted_implementation_without_pr
             _capability_host(impl).test_mixin_capability_hook_rejects()
 
     _with_probe_impl(check)
+
+
+def test_implementation_import_fails_unless_the_dependency_is_declared() -> None:
+    from mloda.testing.feature_groups.data_operations.operation_group import ImplSpec, OperationGroupTestBase
+
+    class _Stub(OperationGroupTestBase):
+        @classmethod
+        def backend_package(cls) -> str:
+            return "mloda.testing"
+
+    missing = ImplSpec("x", "no_such_module", "X", "m", "M")
+    with pytest.raises(ModuleNotFoundError):
+        _Stub._implementation(missing)
+    with pytest.raises(pytest.skip.Exception):
+        _Stub._implementation(missing._replace(dependency="no_such_dependency"))
+    with pytest.raises(ModuleNotFoundError):
+        _Stub._implementation(missing._replace(dependency="pytest"))

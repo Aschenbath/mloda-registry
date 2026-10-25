@@ -21,6 +21,7 @@ from mloda.testing.feature_groups.data_operations.helpers import extract_column,
 
 PYARROW_TABLE = "mloda_plugins.compute_framework.base_implementations.pyarrow.table:PyArrowTable"
 PANDAS_DATAFRAME = "mloda_plugins.compute_framework.base_implementations.pandas.dataframe:PandasDataFrame"
+POLARS_LAZY_DATAFRAME = "mloda_plugins.compute_framework.base_implementations.polars.lazy_dataframe:PolarsLazyDataFrame"
 SQLITE_FRAMEWORK = "mloda_plugins.compute_framework.base_implementations.sqlite.sqlite_framework:SqliteFramework"
 
 
@@ -59,6 +60,8 @@ class OperationGroupIntegrationTestMixin:
     - ``divergent_routing_cases()``: features that data held in the ``routing_data_creator()`` framework
       must see served by another Implementation (a divergent one) or kept on it (a non-divergent one).
     - ``routing_data_creator()``: the data creator whose framework holds the routed data. Default: Pandas.
+    - ``routing_frameworks()``: the frameworks enabled for the routing test besides the creator's.
+      Default: ``pipeline_compute_frameworks()``.
     - ``unsupported_framework_case()``: a (feature name, options) that ``compute_framework_class()`` alone
       cannot serve, so a run on it is rejected at resolve time.
     """
@@ -75,6 +78,11 @@ class OperationGroupIntegrationTestMixin:
         from mloda.testing.data_creator.pandas import PandasDataOpsTestDataCreator
 
         return PandasDataOpsTestDataCreator
+
+    @classmethod
+    def routing_frameworks(cls) -> list[type[Any]]:
+        """The frameworks enabled with the creator's in ``test_data_is_routed_by_divergence``."""
+        return cls.pipeline_compute_frameworks()  # type: ignore[attr-defined, no-any-return]
 
     @classmethod
     def unsupported_framework_case(cls) -> tuple[str, dict[str, Any]] | None:
@@ -117,12 +125,16 @@ class OperationGroupIntegrationTestMixin:
             self.primary_feature_options(),  # type: ignore[attr-defined]
         )
 
-        with pytest.raises(FeatureResolutionError):
+        with pytest.raises(FeatureResolutionError) as excinfo:
             mloda.run_all(
                 [feature],
                 compute_frameworks=[self.compute_framework_class()],  # type: ignore[attr-defined]
                 plugin_collector=collector,
             )
+        message = str(excinfo.value)
+        assert group.__name__ in message
+        if implementations:
+            assert "disabled or denied" in message
 
     def test_group_is_rejected_when_none_of_its_frameworks_is_enabled(self) -> None:
         """An operation group with a loaded Implementation fails on a framework it has no Implementation for."""
@@ -187,7 +199,7 @@ class OperationGroupIntegrationTestMixin:
 
         creator = self.routing_data_creator()
         group = self.feature_group_class()  # type: ignore[attr-defined]
-        frameworks = list(dict.fromkeys([creator.compute_framework, *self.pipeline_compute_frameworks()]))  # type: ignore[attr-defined]
+        frameworks = list(dict.fromkeys([creator.compute_framework, *self.routing_frameworks()]))
         collector = enabled_with_implementations({creator, group})
         for case in cases:
             feature = Feature(case.feature_name, options=Options(context=case.options))
