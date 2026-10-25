@@ -212,6 +212,23 @@ class WindowAggregationTestBase(
         """Aggregation types this framework supports. Override to restrict."""
         return cls.ALL_AGG_TYPES
 
+    @classmethod
+    def merges_signed_zero_keys(cls) -> bool:
+        """Whether this framework merges 0.0 and -0.0 partition keys and nunique values.
+
+        The reference merges them. PyArrow splits partition keys and nunique values;
+        TestPyArrowWindowAggregation overrides to False.
+        """
+        return True
+
+    @classmethod
+    def orders_nan_before_none(cls) -> bool:
+        """Whether order_by puts NaN before None (the reference: real values, NaN, then None).
+
+        Backends that tie NaN and None override to False.
+        """
+        return True
+
     # -- MaskTestMixin configuration -------------------------------------------
 
     @classmethod
@@ -276,7 +293,7 @@ class WindowAggregationTestBase(
 
     @classmethod
     def reference_calculate(cls, table: pa.Table, features: Any) -> Any:
-        """Run the PyArrow-backed reference function on the canonical table."""
+        """Run the pure Python reference function on the canonical table."""
         from mloda.testing.feature_groups.data_operations.row_preserving.window_aggregation.reference import (
             reference_window_aggregation,
         )
@@ -377,7 +394,7 @@ class WindowAggregationTestBase(
             pytest.param("value_int__nunique_window", "nunique", None, False, id="nunique"),
             pytest.param("value_int__first_window", "first", "value_int", False, id="first"),
             pytest.param("value_int__last_window", "last", "value_int", False, id="last"),
-            # PyArrow picks the first-encountered value on ties. Frameworks that use
+            # The reference picks the first-encountered value on ties. Frameworks that use
             # different tie-breaking must exclude 'mode' from supported_agg_types().
             pytest.param("value_int__mode_window", "mode", None, False, id="mode"),
         ],
@@ -484,7 +501,7 @@ class WindowAggregationTestBase(
         """Mode of value_int partitioned by region.
 
         reference: [10,10,10,10, 50,50,50,50, 15,15,15, -10].
-        On ties (all-unique groups A, B), PyArrow picks the first-encountered value.
+        On ties (all-unique groups A, B), the reference picks the first-encountered value.
         """
         self._skip_if_unsupported("mode")
         fs = make_feature_set("value_int__mode_window", ["region"])
@@ -650,6 +667,64 @@ class WindowAggregationTestBase(
         # last non-null = 200, broadcast to all rows
         assert result_col == [200, 200, 200, 200]
 
+    def test_signed_zero_partition_keys(self) -> None:
+        """Partition keys 0.0 and -0.0: the reference and most backends merge them into one group."""
+        table = pa.table(
+            {
+                "k": pa.array([0.0, -0.0, -0.0], type=pa.float64()),
+                "v": pa.array([1, 2, 3], type=pa.int64()),
+            }
+        )
+        feature_name = "v__count_window"
+        fs = make_feature_set(feature_name, ["k"])
+
+        assert self._ref_column(table, fs, feature_name) == [3, 3, 3]
+
+        result = calculate_with(self.implementation_class(), self.create_test_data(table), fs)
+        expected = [3, 3, 3] if self.merges_signed_zero_keys() else [1, 2, 2]
+        assert self.extract_column(result, feature_name) == expected
+
+    def test_signed_zero_nunique_values(self) -> None:
+        """nunique over 0.0 and -0.0 values: the reference and merging backends count 1, PyArrow counts 2."""
+        self._skip_if_unsupported("nunique")
+        table = pa.table(
+            {
+                "k": pa.array(["a", "a", "a"], type=pa.string()),
+                "v": pa.array([0.0, -0.0, -0.0], type=pa.float64()),
+            }
+        )
+        feature_name = "v__nunique_window"
+        fs = make_feature_set(feature_name, ["k"])
+
+        assert self._ref_column(table, fs, feature_name) == [1, 1, 1]
+
+        result = calculate_with(self.implementation_class(), self.create_test_data(table), fs)
+        expected = [1, 1, 1] if self.merges_signed_zero_keys() else [2, 2, 2]
+        assert self.extract_column(result, feature_name) == expected
+
+    def test_nan_orders_before_none(self) -> None:
+        """order_by [None, NaN, 1.0]: the reference puts NaN before None, so last is the None row's value."""
+        self._skip_if_unsupported("last")
+        table = pa.table(
+            {
+                "g": ["a", "a", "a"],
+                "o": pa.array([None, float("nan"), 1.0], type=pa.float64()),
+                "v": pa.array([10, 20, 30], type=pa.int64()),
+            }
+        )
+        feature_name = "v__last_window"
+        fs = make_feature_set(feature_name, ["g"], order_by="o")
+
+        assert self._ref_column(table, fs, feature_name) == [10, 10, 10]
+
+        result = calculate_with(self.implementation_class(), self.create_test_data(table), fs)
+        expected = [10, 10, 10] if self.orders_nan_before_none() else [20, 20, 20]
+        assert self.extract_column(result, feature_name) == expected
+
+    def _ref_column(self, table: pa.Table, fs: FeatureSet, feature_name: str) -> list[Any]:
+        column: list[Any] = self.reference_calculate(table, fs).column(feature_name).to_pylist()
+        return column
+
     def test_multi_key_float_avg(self) -> None:
         """Avg of value_float partitioned by [region, category]."""
         fs = make_feature_set("value_float__avg_window", ["region", "category"])
@@ -712,7 +787,7 @@ class WindowAggregationTestBase(
         """Mode of value_int partitioned by [region, category].
 
         reference: [10,-5,10,-5, 60,50,30,60, 15,15,15, -10].
-        On ties, PyArrow picks the first-encountered value.
+        On ties, the reference picks the first-encountered value.
         """
         self._skip_if_unsupported("mode")
         fs = make_feature_set("value_int__mode_window", ["region", "category"])

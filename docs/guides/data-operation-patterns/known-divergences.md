@@ -1,6 +1,6 @@
 # Known Divergences
 
-Authoritative list of cases where a non-PyArrow framework would, without intervention, produce a different result from the PyArrow reference on realistic inputs. For each one, this page records the mitigation and how to detect a regression.
+Authoritative list of cases where a framework would, without intervention, produce a different result from the reference on realistic inputs. For each one, this page records the mitigation and how to detect a regression.
 
 **What**: Every audited case where a framework's native operator diverges from PyArrow semantics.
 **When**: Read this before adding a new data-operation implementation, a new framework, or changing null or tie-breaking behavior in an existing one.
@@ -32,7 +32,7 @@ An entry is added here only after a cross-framework test or an explicit audit ha
 <!-- machine-checked
 operation: aggregation, scalar_aggregate, window_aggregation, frame_aggregate
 framework: polars_lazy
-condition: sum() on an all-null group returns 0 instead of PyArrow's null
+condition: sum() on an all-null group returns 0 instead of the reference's null
 mitigation_location:
 - mloda/community/feature_groups/data_operations/aggregation/polars_lazy_aggregation.py
 - mloda/community/feature_groups/data_operations/row_preserving/scalar_aggregate/polars_lazy_scalar_aggregate.py
@@ -45,7 +45,7 @@ regression_test:
 
 - **Operations**: `aggregation`, `scalar_aggregate`, `window_aggregation`, `frame_aggregate`.
 - **Where it lives**: `mloda/community/feature_groups/data_operations/aggregation/polars_lazy_aggregation.py`, `.../row_preserving/scalar_aggregate/polars_lazy_scalar_aggregate.py`, `.../row_preserving/window_aggregation/polars_lazy_window_aggregation.py`, `.../row_preserving/frame_aggregate/polars_lazy_frame_aggregate.py`.
-- **Reference behavior**: PyArrow's `pc.sum` returns `null` when every input value in the group is null.
+- **Reference behavior**: the reference returns `null` when every input value in the group is null (PyArrow's `pc.sum` does too).
 - **Native Polars behavior**: `pl.col(...).sum()` returns `0` for the same input; `rolling_sum_by` likewise returns `0` for an all-null window.
 - **Mitigation kind**: Implementation fix.
 - **How**: The Polars implementation wraps the `sum` expression with `pl.when(count > 0).then(sum).otherwise(None)`, so an all-null group maps back to `null`. The frame aggregate time window applies the same guard using a rolling non-null count.
@@ -90,7 +90,7 @@ regression_test:
 
 - **Operations**: `aggregation` (`mode` agg type), `window_aggregation` (`mode` agg type).
 - **Where it lives**: `mloda/community/feature_groups/data_operations/polars_mode_helpers.py` (shared Polars Lazy helpers used by both `polars_lazy_aggregation.py` and `polars_lazy_window_aggregation.py`); Pandas uses the vectorized `compute_mode_winners` helper in `pandas_helpers.py`.
-- **Reference behavior**: `aggregation_helpers.mode` (shared by the aggregation and window_aggregation references) breaks ties by first occurrence in the input ordering. This is the reference's own convention, not `pc.mode`'s, which returns the smallest value among ties (see [When PyArrow has no kernel](03-reference-implementation.md#when-pyarrow-has-no-kernel-or-is-the-outlier)). For NaN the policy follows `pc.mode`, which counts NaN as one value, as the reference, Polars, and PythonDict all do (`[1.0, nan, nan]` gives `nan`); see `DataOpsTestBase.nan_policy_table` for the NaN-mixed fixture (Pandas diverges here, see the entry below).
+- **Reference behavior**: `aggregation_helpers.mode` (shared by the aggregation, window_aggregation, frame_aggregate and scalar_aggregate references) breaks ties by first occurrence in the input ordering. This is the reference's own convention, not `pc.mode`'s, which returns the smallest value among ties (see [When PyArrow has no kernel](03-reference-implementation.md#when-pyarrow-has-no-kernel-or-is-the-outlier)). For NaN the policy follows `pc.mode`, which counts NaN as one value, as the reference, Polars, and PythonDict all do (`[1.0, nan, nan]` gives `nan`); see `DataOpsTestBase.nan_policy_table` for the NaN-mixed fixture (Pandas diverges here, see the entry below).
 - **Native framework behavior**: Polars' `.mode()` and Pandas' `.mode()` break ties differently (sorted order / multiple returned values / unspecified).
 - **Mitigation kind**: Implementation fix.
 - **How**: Both frameworks explicitly rank candidate values by `(count desc, first_occurrence_index asc)` and take the head. The Polars Lazy implementation stays inside the lazy / vectorised path: it adds per-`(partition, value)` count and first-index columns via `.over()`, then uses `sort_by([cnt, first_idx], descending=[True, False], maintain_order=True).first()` (no Python callback). On Pandas this is a single vectorized groupby over `(partition_by, value)` that aggregates count and first-occurrence index, avoiding a per-group Python reducer.
@@ -201,7 +201,7 @@ regression_test:
 -->
 
 - **Operations**: `row_preserving/frame_aggregate`, `.../offset`, `.../percentile`, `.../rank`.
-- **Reference behavior**: PyArrow is the reference *for correctness semantics*, but it does not provide native rolling/expanding, LAG/LEAD, percentile, or rank. The reference functions for these ops (`reference_rank`, `reference_offset`, `reference_percentile`) live in pure Python over PyArrow arrays, and rank, offset and percentile have no PyArrow Implementation (requesting them on PyArrowTable alone is a resolution error).
+- **Reference behavior**: PyArrow is the reference *for correctness semantics* of the operations that keep a PyArrow-based reference, but it does not provide native rolling/expanding, LAG/LEAD, percentile, or rank. Frame aggregate has a pure Python reference. The reference functions for rank, offset and percentile (`reference_rank`, `reference_offset`, `reference_percentile`) live in pure Python over PyArrow arrays, and rank, offset and percentile have no PyArrow Implementation (requesting them on PyArrowTable alone is a resolution error).
 - **Mitigation kind**: Excluded op (from the test suite and from routing, since no PyArrow Implementation exists).
 - **How**: The `supported_ops()` / `supported_agg_types()` on each operation's PyArrow test class returns an empty or reduced set so the suite does not try to compare against an implementation that does not exist. Aggregation declares its PyArrow capability on the implementation (`PyArrowAggregation.supported`), so `median` and `mode` are not offered there. See `aggregation/tests/test_pyarrow.py` and `row_preserving/window_aggregation/tests/test_pyarrow.py`.
 - **Regression signal**: Restoring the op on PyArrow requires both providing a native implementation and re-expanding the supported set; no silent skip is possible.
@@ -263,7 +263,7 @@ regression_test:
 
 - **Operations**: `row_preserving/frame_aggregate` (only the `time` frame type).
 - **Mitigation kind**: Accepted complexity (correctness preserved).
-- **How**: Both backends issue a correlated subquery `SELECT agg(s.{col}) FROM t s WHERE s.{partition}=t.{partition} AND s.{ts} >= t.{ts} - delta AND (s.{ts} < t.{ts} OR (s.{ts}=t.{ts} AND s.{tiebreak}<=t.{tiebreak}))`. SQLite uses `julianday()` arithmetic (preserves sub-second precision; `datetime()` would truncate) with `rowid` as the peer tiebreaker. DuckDB uses `INTERVAL '{N}' {unit}` arithmetic with `ROW_NUMBER()` as the tiebreaker. The tiebreaker is required to match the PyArrow reference's positional `rows[:pos+1]` semantics on same-ts peers; SQL `RANGE` windows and `BETWEEN` predicates without a tiebreaker include all peers (both earlier and later in physical position).
+- **How**: Both backends issue a correlated subquery `SELECT agg(s.{col}) FROM t s WHERE s.{partition}=t.{partition} AND s.{ts} >= t.{ts} - delta AND (s.{ts} < t.{ts} OR (s.{ts}=t.{ts} AND s.{tiebreak}<=t.{tiebreak}))`. SQLite uses `julianday()` arithmetic (preserves sub-second precision; `datetime()` would truncate) with `rowid` as the peer tiebreaker. DuckDB uses `INTERVAL '{N}' {unit}` arithmetic with `ROW_NUMBER()` as the tiebreaker. The tiebreaker is required to match the reference's positional `rows[:pos+1]` semantics on same-ts peers; SQL `RANGE` windows and `BETWEEN` predicates without a tiebreaker include all peers (both earlier and later in physical position).
 - **Related**: parent #183, implementing #202.
 
 ### Polars time-frame adds 1ns-per-row offset to break same-ts peer ties
@@ -280,7 +280,7 @@ regression_test:
 
 - **Operations**: `row_preserving/frame_aggregate` (only the `time` frame type).
 - **Mitigation kind**: Accepted complexity (correctness preserved).
-- **How**: Polars `rolling_*_by` with `closed="both"` is value-based and includes every row whose `by` value equals the current row's value, even peers that come later in physical position. The PyArrow reference uses `rows[:pos+1]` after a stable sort, excluding later peers. `polars_lazy_frame_aggregate.py` casts the `order_by` column to `datetime[ns]` and adds `pl.duration(nanoseconds=row_index)` into a temporary `__mloda_synth_ts__` column, then runs `rolling_*_by` on the synthetic column. The window string is extended by `{N}ns` (where N is total row count) so a peer at the exact lower bound is not lost to the offset. The synthetic column is dropped before returning. See `polars_lazy_frame_aggregate.py`.
+- **How**: Polars `rolling_*_by` with `closed="both"` is value-based and includes every row whose `by` value equals the current row's value, even peers that come later in physical position. The reference uses `rows[:pos+1]` after a stable sort, excluding later peers. `polars_lazy_frame_aggregate.py` casts the `order_by` column to `datetime[ns]` and adds `pl.duration(nanoseconds=row_index)` into a temporary `__mloda_synth_ts__` column, then runs `rolling_*_by` on the synthetic column. The window string is extended by `{N}ns` (where N is total row count) so a peer at the exact lower bound is not lost to the offset. The synthetic column is dropped before returning. See `polars_lazy_frame_aggregate.py`.
 - **Related**: parent #183, implementing #202.
 
 ### SQLite + Pandas reject month/year time windows
@@ -299,7 +299,7 @@ regression_test:
 
 - **Operations**: `row_preserving/frame_aggregate` (only `time` frame type with `month`/`year` units).
 - **Mitigation kind**: Excluded unit.
-- **How**: SQLite's native `datetime(ts, '-N months')` uses day-of-month rollover (Mar 31 -1mo = Mar 3), diverging from `dateutil.relativedelta` (= Feb 28) used by the PyArrow reference. Pandas `.rolling(window="...", on=ts)` only accepts fixed-frequency offsets and has no native calendar-anchored option. Rather than fall back to a Python loop (which would defeat the point of running inside the engine), both `SqliteFrameAggregate.SUPPORTED_TIME_UNITS` and `PandasFrameAggregate.SUPPORTED_TIME_UNITS` exclude `month`/`year` and `accepts` reads them, so features like `value__sum_1_month_window` fail resolution on those frameworks. Both support `second`/`minute`/`hour`/`day`/`week`. Polars and DuckDB express month/year natively and remain ✓ for those units.
+- **How**: SQLite's native `datetime(ts, '-N months')` uses day-of-month rollover (Mar 31 -1mo = Mar 3), diverging from `dateutil.relativedelta` (= Feb 28) used by the reference. Pandas `.rolling(window="...", on=ts)` only accepts fixed-frequency offsets and has no native calendar-anchored option. Rather than fall back to a Python loop (which would defeat the point of running inside the engine), both `SqliteFrameAggregate.SUPPORTED_TIME_UNITS` and `PandasFrameAggregate.SUPPORTED_TIME_UNITS` exclude `month`/`year` and `accepts` reads them, so features like `value__sum_1_month_window` fail resolution on those frameworks. Both support `second`/`minute`/`hour`/`day`/`week`. Polars and DuckDB express month/year natively and remain ✓ for those units.
 - **Related**: parent #183, implementing #202.
 
 ### Pandas / Polars-lazy native time-rolling rejects null `order_by`
@@ -362,7 +362,7 @@ regression_test:
 <!-- machine-checked
 operation: percentile, rank, offset, ffill, ema, sessionization, resample, aggregation, window_aggregation
 framework: python_dict
-condition: a raw NaN partition-key value splits into its own singleton group, and NaN in a min/max/median/percentile input is not skipped, unlike the PyArrow reference
+condition: a raw NaN partition-key value splits into its own singleton group, and NaN in a min/max/median/percentile input is not skipped, unlike the reference
 mitigation_location:
 - mloda/community/feature_groups/data_operations/python_dict_helpers.py
 - mloda/community/feature_groups/data_operations/row_preserving/percentile/python_dict_percentile.py
@@ -383,7 +383,7 @@ regression_test:
 
 - **Operations**: `percentile`, `rank`, `offset`, `ffill`, `ema`, `sessionization`, `resample`, `aggregation`, `window_aggregation` (every PythonDict backend that partitions rows or reduces a value list).
 - **Where it lives**: `mloda/community/feature_groups/data_operations/python_dict_helpers.py` (`group_key_value`, `is_nan`, `nulls_last_sort_key`, `values_equal`, `reduce_agg`), consumed by every PythonDict backend under `row_preserving/` and `row_changing/resample/`.
-- **Reference behavior**: PyArrow's `Table.group_by()` merges all NaN keys of a column into a single group, distinct from the null/None group. `pc.min`/`pc.max`/`pc.quantile` skip NaN like a missing value; an all-NaN (non-empty) group still returns NaN, not null.
+- **Reference behavior**: the aggregation and window_aggregation references merge all NaN keys of a column into a single group, distinct from the null/None group, as PyArrow's `Table.group_by()` does for the other operations. `pc.min`/`pc.max`/`pc.quantile` skip NaN like a missing value; an all-NaN (non-empty) group still returns NaN, not null.
 - **Native PythonDict behavior (unmitigated)**: `float('nan')` never equals another NaN, so a raw `tuple(col[i] for col in partition_cols)` group key splits every NaN-valued row into its own singleton group. Python's builtin `min()`/`max()`, `statistics.median`, and `sorted()`-based percentile interpolation propagate NaN instead of skipping it.
 - **Mitigation kind**: Implementation fix.
 - **How**: Most PythonDict backends build their group key through `group_key_value`, which substitutes a shared sentinel for any NaN component so NaN-keyed rows land in one group; `reduce_agg`'s `min`/`max`/`median` branches and `_percentile_of` filter NaN out of the reduced value list before reducing, matching PyArrow's skip-NaN semantics, and `min`/`max` return NaN (not null) when every non-null value in the group is NaN. `python_dict_sessionization.py` is the exception: it never calls `group_key_value`. Instead it sorts raw partition-key values through `partition_sort_key` (which gives NaN and None each their own contiguous sort tier) and compares adjacent sorted rows with `values_equal` (NaN-safe equality), so two NaN-keyed rows still land in one contiguous, un-poisoned session without ever building a normalized key.
@@ -510,44 +510,67 @@ regression_test:
 ### PythonDict `group_key_value` merges `0.0` and `-0.0` into one group
 
 <!-- machine-checked
-operation: aggregation, resample, window_aggregation, frame_aggregate, rank, sessionization, percentile
+operation: resample, rank, sessionization, percentile
 framework: python_dict
 condition: group_key_value passes 0.0 and -0.0 through unchanged, and Python's float equality/hash merge them as dict keys
 mitigation_location:
 - mloda/community/feature_groups/data_operations/python_dict_helpers.py
 regression_test:
 - mloda/community/feature_groups/data_operations/tests/test_python_dict_helpers.py::TestGroupKeyValueMergesSignedZeroDocumentedDivergence::test_positive_and_negative_zero_collide_into_one_group
-- mloda/testing/feature_groups/data_operations/aggregation/aggregation.py::AggregationTestBase::test_signed_zero_partition_keys
 -->
 
-- **Operations**: `aggregation`, `resample`, `window_aggregation`, `frame_aggregate`, `rank`, `sessionization`, `percentile` (every PythonDict backend that groups rows by a float-valued partition column).
+- **Operations**: `resample`, `rank`, `sessionization`, `percentile` (every PythonDict backend that groups rows by a float-valued partition column). The aggregating operations have a pure Python reference that merges the keys too, so they do not diverge.
 - **Where it lives**: `mloda/community/feature_groups/data_operations/python_dict_helpers.py` (`group_key_value`).
 - **Reference behavior**: PyArrow's `Table.group_by()` hashes a float key bitwise, so `0.0` and `-0.0` (distinct bit patterns) land in two separate groups (verified directly: grouping `[0.0, -0.0]` produces 2 groups).
-- **Cross-framework check**: verified directly against each engine: Pandas' `.groupby()`, Polars' `.group_by()`, and DuckDB's `GROUP BY` all merge `0.0` and `-0.0` into a single group too, the same as PythonDict. PyArrow is the only one of the five frameworks that treats them as distinct; PythonDict's raw-dict-key grouping matches the four-out-of-five majority (Pandas, Polars, DuckDB, PythonDict). `AggregationTestBase.test_signed_zero_partition_keys` now pins this formally for `aggregation` only: the reference splits `0.0`/`-0.0` into two groups, and each framework's `merges_signed_zero_keys()` hook (default `True`; `TestPyArrowAggregation` overrides to `False`) asserts whether it merges or splits. The other six operations above remain verified only informally, not by a per-operation test.
+- **Cross-framework check**: verified directly against each engine: Pandas' `.groupby()`, Polars' `.group_by()` and DuckDB's `GROUP BY` all merge `0.0` and `-0.0` into a single group too, the same as PythonDict. PyArrow is the only one of the four that treats them as distinct, so PythonDict's raw-dict-key grouping matches the majority. These four operations are verified only informally, not by a per-operation test.
 - **Native PythonDict behavior**: `group_key_value` only special-cases NaN; `0.0` and `-0.0` pass through unchanged. Python's `float.__eq__` and `float.__hash__` both treat `0.0 == -0.0` as `True` with equal hashes, so a plain `dict`/`set` keyed by the raw value merges them into one group regardless of what `group_key_value` does.
 - **Mitigation kind**: Accepted divergence (no mitigation attempted), as the outlier rule of the [reference policy](03-reference-implementation.md#when-pyarrow-has-no-kernel-or-is-the-outlier) prescribes.
 - **How**: A `group_key_value`-only fix would not even be internally consistent: `values_equal` (used by the sort-based sessionization grouping path) and `partition_sort_key` both treat `0.0 == -0.0` on purpose (see `test_negative_zero_equals_zero`, `test_negative_zero_and_zero_sort_together`), so PythonDict's own sort-keyed sessionization backend would keep merging them while its dict-keyed backends stopped, a new internal inconsistency. A real fix needs all three functions to become sign-aware (`(value, math.copysign(1.0, value))` instead of the raw value on every hot grouping path), and would only trade PythonDict's current agreement with Pandas/Polars/DuckDB for agreement with PyArrow alone, a lateral move in total cross-framework divergence for a sign-of-zero edge case that is exceedingly rare in real partition columns. The divergence is documented instead of mitigated.
 - **Regression signal**: `test_positive_and_negative_zero_collide_into_one_group` pins that a `group_key_value`-keyed dict merges `0.0` and `-0.0` into a single group; a future change that makes `group_key_value` sign-aware would flip this assertion.
 
-### Pandas, Polars, DuckDB, and SQLite also merge `0.0`/`-0.0` partition keys
+### PyArrow splits `0.0` and `-0.0`
 
 <!-- machine-checked
-operation: aggregation
-framework: pandas, polars_lazy, duckdb, sqlite
-condition: each engine's own GROUP BY / groupby() / group_by() hashes 0.0 and -0.0 equal, unlike PyArrow's Table.group_by()
+operation: aggregation, window_aggregation
+framework: pyarrow
+condition: PyArrow's Table.group_by() and count_distinct treat 0.0 and -0.0 as distinct, unlike the reference and the other frameworks
 mitigation_location:
-- mloda/community/feature_groups/data_operations/aggregation/pandas_aggregation.py
-- mloda/community/feature_groups/data_operations/aggregation/polars_lazy_aggregation.py
-- mloda/community/feature_groups/data_operations/aggregation/duckdb_aggregation.py
-- mloda/community/feature_groups/data_operations/aggregation/sqlite_aggregation.py
+- mloda/community/feature_groups/data_operations/aggregation/pyarrow_aggregation.py
+- mloda/community/feature_groups/data_operations/row_preserving/window_aggregation/pyarrow_window_aggregation.py
 regression_test:
 - mloda/testing/feature_groups/data_operations/aggregation/aggregation.py::AggregationTestBase::test_signed_zero_partition_keys
+- mloda/testing/feature_groups/data_operations/aggregation/aggregation.py::AggregationTestBase::test_signed_zero_nunique_values
+- mloda/testing/feature_groups/data_operations/row_preserving/window_aggregation/window_aggregation.py::WindowAggregationTestBase::test_signed_zero_partition_keys
+- mloda/testing/feature_groups/data_operations/row_preserving/window_aggregation/window_aggregation.py::WindowAggregationTestBase::test_signed_zero_nunique_values
 -->
 
-- **Operations**: `aggregation` (the only operation this test pins for these frameworks).
-- **Native behavior**: Pandas' `.groupby()`, Polars' `.group_by()`, DuckDB's `GROUP BY`, and SQLite's `GROUP BY` all hash `0.0 == -0.0`, merging both into one group, matching PythonDict's raw-dict-key grouping and diverging from PyArrow's `Table.group_by()`, which treats them as distinct.
-- **Mitigation kind**: Accepted divergence, per the outlier rule of the [reference policy](03-reference-implementation.md#when-pyarrow-has-no-kernel-or-is-the-outlier); PyArrow is the one-of-five outlier here, not the majority.
-- **Regression signal**: `test_signed_zero_partition_keys` asserts the reference splits `0.0`/`-0.0` into two groups and each backend's `merges_signed_zero_keys()` hook (default `True`) asserts the merged-group result; only `TestPyArrowAggregation` overrides it to `False`.
+- **Operations**: `aggregation` and `window_aggregation` (partition keys and `nunique` values).
+- **Native behavior**: PyArrow hashes a float bitwise, so `0.0` and `-0.0` land in two groups and count as two distinct values. The reference, Pandas, Polars, DuckDB, SQLite and PythonDict merge them.
+- **Mitigation kind**: Accepted divergence. A branch on the hot grouping path for a sign-of-zero edge case the canonical fixture does not exercise is not worth it. It is not a `divergent` entry: that mapping is a routing penalty, and this is a key and value level edge case.
+- **Regression signal**: `test_signed_zero_partition_keys` and `test_signed_zero_nunique_values` (in both `AggregationTestBase` and `WindowAggregationTestBase`) assert the reference merges, and `merges_signed_zero_keys()` (default `True`; `TestPyArrowAggregation` and `TestPyArrowWindowAggregation` override to `False`) pins each backend.
+
+### PythonDict, Pandas and SQLite tie NaN and None in `order_by`; the reference orders NaN before None
+
+<!-- machine-checked
+operation: window_aggregation, frame_aggregate
+framework: python_dict, pandas, sqlite
+condition: window first/last and frame aggregates tie NaN and None order keys, while the reference orders real values, then NaN, then None
+mitigation_location:
+- mloda/community/feature_groups/data_operations/python_dict_helpers.py
+- mloda/community/feature_groups/data_operations/row_preserving/window_aggregation/python_dict_window_aggregation.py
+- mloda/community/feature_groups/data_operations/row_preserving/window_aggregation/pandas_window_aggregation.py
+- mloda/community/feature_groups/data_operations/row_preserving/frame_aggregate/python_dict_frame_aggregate.py
+- mloda/community/feature_groups/data_operations/row_preserving/frame_aggregate/pandas_frame_aggregate.py
+- mloda/community/feature_groups/data_operations/row_preserving/frame_aggregate/sqlite_frame_aggregate.py
+regression_test:
+- mloda/testing/feature_groups/data_operations/row_preserving/window_aggregation/window_aggregation.py::WindowAggregationTestBase::test_nan_orders_before_none
+- mloda/testing/feature_groups/data_operations/row_preserving/frame_aggregate/frame_aggregate.py::FrameAggregateTestBase::test_nan_orders_before_none
+-->
+
+- **Operations**: `window_aggregation` (`first`, `last`) and `frame_aggregate` (every frame type).
+- **Native behavior**: on `order_by = [None, nan, 1.0]` the reference gives window `last` `[10, 10, 10]` and frame `cumsum` `[60, 50, 30]`. PythonDict and Pandas (window and frame) and SQLite (frame) tie NaN and None, giving window `last` `[20, 20, 20]` and frame `cumsum` `[40, 60, 30]`. Pandas and SQLite cannot tell NaN from null; PythonDict folds them into one null-like tier.
+- **Mitigation kind**: Accepted divergence. Splitting the tiers would trade agreement with Pandas for agreement with the reference, the same trade as the rank entry below.
+- **Regression signal**: `test_nan_orders_before_none` in both test bases asserts the reference value, then the backend value through `orders_nan_before_none()` (default `True`; the PythonDict, Pandas and SQLite classes above override to `False`).
 
 ### PythonDict and SQLite rank tie None and NaN in order-value runs; PyArrow >= 25, DuckDB, and Polars rank them apart
 
@@ -617,6 +640,6 @@ Format rules for the block: `operation`, `framework`, and `condition` are single
 ## Related
 
 - [Framework support matrix](framework-support-matrix.md) - The full operation x framework capability table; every divergence-driven exclusion on this page corresponds to one or more matrix cells.
-- [Reference implementation pattern](03-reference-implementation.md) - Why PyArrow is authoritative.
+- [Reference implementation pattern](03-reference-implementation.md) - Which framework is the reference, and why.
 - [Supported ops per framework](04-supported-ops.md) - The exclusion mechanism used when a framework cannot match PyArrow.
 - [Row-preserving contract](02-row-preserving-contract.md) - The invariant every row-preserving op must honor.
