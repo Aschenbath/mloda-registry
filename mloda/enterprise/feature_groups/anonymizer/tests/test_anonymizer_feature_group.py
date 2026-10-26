@@ -42,6 +42,7 @@ STUB_CMD = [
     AnonymizerFeatureGroup.BINARY_PLUGIN_ID,
 ]
 VALID_LICENSE_KEY = valid_license_token([AnonymizerFeatureGroup.BINARY_PLUGIN_ID])
+LIST_UTF8_ROWS: list[list[str | None] | None] = [["alpha", "beta"], None, [], ["gamma", None]]
 KEY_ENV = "ANONYMIZER_TEST_PII_KEY"
 UNSET_KEY_ENV = "ANONYMIZER_TEST_UNSET_PII_KEY"
 
@@ -106,6 +107,13 @@ def _result_column(results: list[Any], name: str) -> list[Any]:
 # -------------------------------------------------------------------------------------------
 # 0. FeatureGroupTestBase smoke check (mirrors the sibling enterprise example)
 # -------------------------------------------------------------------------------------------
+
+
+def _assert_list_utf8_pseudonymized(out: list[Any]) -> None:
+    assert [None if r is None else len(r) for r in out] == [None if r is None else len(r) for r in LIST_UTF8_ROWS]
+    flat_in = [v for row in LIST_UTF8_ROWS if row for v in row]
+    flat_out = [v for row in out if row for v in row]
+    assert flat_out == compute_expected_hmac_sha256_column(flat_in, KNOWN_ANSWER_KEY)
 
 
 class TestAnonymizerFeatureGroupClassSet(FeatureGroupTestBase):
@@ -225,6 +233,13 @@ class TestCalculateFeature:
         result = StubAnonymizer.calculate_feature(table, _feature_set(_string_feature()))
         expected = compute_expected_hmac_sha256_column(rows, KNOWN_ANSWER_KEY)
         assert result.column("email__hmac_sha256_pseudonymized").to_pylist() == expected
+
+    def test_list_utf8_source_is_pseudonymized_element_wise(self, key_env: str) -> None:
+        table = pa.table({"email": pa.array(LIST_UTF8_ROWS, type=pa.list_(pa.string()))})
+        result = StubAnonymizer.calculate_feature(table, _feature_set(_config_feature("pseudonymized_email")))
+        out = result.column("pseudonymized_email")
+        assert pa.types.is_list(out.type)
+        _assert_list_utf8_pseudonymized(out.to_pylist())
 
     def test_key_with_surrounding_whitespace_is_stripped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(KEY_ENV, KNOWN_ANSWER_KEY + "\n")
@@ -350,6 +365,17 @@ class TestIntegration:
         )
         expected = compute_expected_hmac_sha256_column(rows["email"], KNOWN_ANSWER_KEY)
         assert _result_column(results, "pseudonymized_email") == expected
+
+    def test_list_utf8_source_end_to_end(self, key_env: str) -> None:
+        rows: dict[str, list[Any]] = {"email": LIST_UTF8_ROWS}
+        results = mloda.run_all(
+            [_config_feature("pseudonymized_email")],
+            compute_frameworks=[PyArrowTable],
+            api_data={"AnonymizerData": rows},
+            plugin_collector=PluginCollector.enabled_feature_groups({ApiDataFG, StubAnonymizer}),
+        )
+        out = _result_column(results, "pseudonymized_email")
+        _assert_list_utf8_pseudonymized(out)
 
     def test_string_form_end_to_end(self, key_env: str) -> None:
         rows: dict[str, list[Any]] = {"email": ["alpha", "beta"]}

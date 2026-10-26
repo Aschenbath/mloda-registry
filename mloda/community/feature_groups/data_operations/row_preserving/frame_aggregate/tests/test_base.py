@@ -21,6 +21,7 @@ from mloda.community.feature_groups.data_operations.base import KeyColumnInputsM
 from mloda.community.feature_groups.data_operations.row_preserving.frame_aggregate.base import (
     _AGGREGATION_TYPES,
     FrameAggregateFeatureGroup,
+    _resolve_frame_agg_type,
 )
 from mloda.testing.feature_groups.data_operations.helpers import load_implementation, make_feature_set
 from mloda.testing.feature_groups.data_operations.match_validation import MatchValidationTestBase, TokenCase
@@ -113,6 +114,17 @@ class TestPatternParsing:
     def test_multi_source_name_rejected(self) -> None:
         with pytest.raises(ValueError, match="allows at most 1 in_feature"):
             FrameAggregateFeatureGroup._extract_single_source_feature(Feature("a&b__sum_rolling_3"))
+
+    @pytest.mark.parametrize(
+        "feature_name",
+        [
+            pytest.param("sales__sum_rolling_" + "9" * 5000, id="rolling"),
+            pytest.param("sales__avg_" + "9" * 5000 + "_day_window", id="time_window"),
+        ],
+    )
+    def test_huge_digit_frame_size_parses_to_none_and_resolves_no_agg_type(self, feature_name: str) -> None:
+        assert FrameAggregateFeatureGroup._parse_frame_feature(feature_name) is None
+        assert _resolve_frame_agg_type(feature_name, Options()) is None
 
 
 class TestParseFrameFeatureMemoization:
@@ -1132,6 +1144,10 @@ class TestImplementationAccepts:
         assert impl.accepts("value__sum_1_week_window", _ROLLING_OPTIONS)
         assert impl.accepts("value_time_frame", time_frame_options("day"))
         assert impl.accepts("value_time_frame", time_frame_options("week"))
+
+    def test_huge_digit_rolling_name_is_unresolved_and_accepted(self) -> None:
+        name = "sales__sum_rolling_" + "9" * 5000
+        assert FrameAggregateFeatureGroup.frame_accepts(name, Options()) is True
 
     @pytest.mark.parametrize("agg_type", ["std", "var", "median"])
     @pytest.mark.parametrize("frame_type", ["cumulative", "expanding"])

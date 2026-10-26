@@ -188,15 +188,23 @@ class TestPatternParsing:
         assert resolution.bindings == {"binning_op": expected_op, "n_bins": expected_n_bins}
         assert isinstance(resolution.bindings["n_bins"], int)
 
-    def test_n_bins_zero_raises(self) -> None:
-        # bin_0 no longer matches the prefix pattern (n_bins must be >= 1), so the
-        # parameters cannot be extracted at all.
+    @pytest.mark.parametrize(
+        "feature_name",
+        [
+            # bin_0 no longer matches the prefix pattern (n_bins must be >= 1)
+            pytest.param("value_int__bin_0", id="bin_0"),
+            pytest.param("value_int__qbin_0", id="qbin_0"),
+            pytest.param("value_int__bin_" + "9" * 5000, id="huge_digits"),
+        ],
+    )
+    def test_unextractable_bin_suffix_raises(self, feature_name: str) -> None:
         with pytest.raises(ValueError, match="Could not extract binning parameters"):
-            BinningFeatureGroup.get_binning_params("value_int__bin_0")
+            BinningFeatureGroup.get_binning_params(feature_name)
 
-    def test_n_bins_zero_qbin_raises(self) -> None:
+    def test_huge_digit_name_does_not_fall_back_to_options(self) -> None:
+        feature = Feature("value_int__bin_" + "9" * 5000, Options(context={"binning_op": "bin", "n_bins": 3}))
         with pytest.raises(ValueError, match="Could not extract binning parameters"):
-            BinningFeatureGroup.get_binning_params("value_int__qbin_0")
+            BinningFeatureGroup._extract_binning_params(feature)
 
     def test_parse_source_feature(self) -> None:
         from mloda.user import Feature
