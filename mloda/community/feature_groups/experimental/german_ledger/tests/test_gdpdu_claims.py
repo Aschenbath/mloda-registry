@@ -75,7 +75,7 @@ FIX = HERE / "fixtures"
 
 
 def test_collision_gate() -> None:
-    """Skr and Sources need a ledger source; the name gate and core keep a claim-all reader off revenue__sources."""
+    """The name gate keeps a claim-all reader off a part name; core keeps it off the chain name."""
     dossier = str(FIX / "dossier_a")
     with_source = DataAccessCollection(folders={dossier})
     no_ledger = DataAccessCollection(folders={str(FIX)})
@@ -97,7 +97,7 @@ def test_collision_gate() -> None:
     assert skr.match_feature_group_criteria("revenue", Options({"GdpduReader": str(FIX)}), datev) is False
     assert skr.match_feature_group_criteria("revenue", Options(), datev) is True
 
-    # The stock reader declines this on its own; the scenario below shows the total survives a claim-all reader.
+    # The stock reader declines the chain name on its own; the scenario below widens it.
     def claimed(name: str) -> Any:
         return claim([FIX / "dossier_a"], name, {JournalFeatureGroup}).feature_group
 
@@ -105,8 +105,11 @@ def test_collision_gate() -> None:
     assert claimed("revenue__sources") is None
 
     facts = run_isolated("collision")
-    assert facts["gated"] == "45385.06", facts
-    assert facts["ungated"] == "45385.06", facts
+    assert facts["gated"] == ["revenue~value"], facts
+    assert facts["gated_owner"] == "SkrAccountFeatureGroup", facts
+    assert facts["ungated_owner"] == "PermissiveReader", facts
+    assert isinstance(facts["ungated"], str), facts
+    assert facts["gated_chain"] == facts["ungated_chain"] == "45385.06", facts
 
 
 def test_gate_records_only_its_own_rejection() -> None:

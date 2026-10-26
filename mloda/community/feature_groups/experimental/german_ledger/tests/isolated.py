@@ -110,7 +110,7 @@ def _revenue(folder: Path, plugin_collector: Any = None) -> str:
 
 
 def collision() -> dict[str, Any]:
-    """A reader that claims every name: with or without the journal's name gate, core keeps it off the computed name."""
+    """The name gate keeps a widened reader off a part name; core keeps it off the chain name."""
     from mloda.community.feature_groups.experimental.german_ledger.tests import _host  # noqa: F401
     from mloda.community.feature_groups.experimental.german_ledger.tests._host import PLUGINS
 
@@ -133,11 +133,23 @@ def collision() -> dict[str, Any]:
 
     # Each leg enables its subclass in place of the stock reader.
     others = PLUGINS.enabled_feature_group_classes - {GdpduReader}
-    gated = outcome(lambda: _revenue(FIX / "dossier_a", PluginCollector.enabled_feature_groups({*others, WideReader})))
-    ungated = outcome(
-        lambda: _revenue(FIX / "dossier_a", PluginCollector.enabled_feature_groups({*others, PermissiveReader}))
-    )
-    return {"gated": gated, "ungated": ungated}
+    gated_groups: set[type[FeatureGroup]] = {*others, WideReader}
+    ungated_groups: set[type[FeatureGroup]] = {*others, PermissiveReader}
+    gated_collector = PluginCollector.enabled_feature_groups(gated_groups)
+    ungated_collector = PluginCollector.enabled_feature_groups(ungated_groups)
+    dossier = FIX / "dossier_a"
+
+    def owner(groups: set[Any]) -> str | None:
+        return getattr(claimant([dossier], "revenue~value", groups), "__name__", None)
+
+    return {
+        "gated_owner": owner(gated_groups),
+        "ungated_owner": owner(ungated_groups),
+        "gated": outcome(lambda: sorted(_run(dossier, ["revenue~value"], gated_collector))),
+        "ungated": outcome(lambda: sorted(_run(dossier, ["revenue~value"], ungated_collector))),
+        "gated_chain": outcome(lambda: _revenue(dossier, gated_collector)),
+        "ungated_chain": outcome(lambda: _revenue(dossier, ungated_collector)),
+    }
 
 
 def plugin_loader_all() -> dict[str, Any]:
