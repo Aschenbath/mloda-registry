@@ -30,7 +30,7 @@ from mloda.community.feature_groups.binary_model.errors import (
     OutputContractError,
     UnsupportedError,
 )
-from mloda.community.feature_groups.binary_model.mixin import BinaryModelMixin
+from mloda.community.feature_groups.binary_model.mixin import BinaryModelMixin, LicenseSource
 from mloda.community.feature_groups.binary_model.tests.process_helpers import kill_descendant_if_running, pid_running
 from mloda.testing.binary_model.arrow import arrow_stream_bytes, arrow_stream_bytes_invalid_utf8
 from mloda.testing.binary_model.conformance import (
@@ -695,6 +695,65 @@ class TestLicenseOverrides:
         env = _SuppressedLicenseModel.binary_environment()
         assert "MLODA_LICENSE_FILE" not in env
         assert "MLODA_LICENSE_KEY" not in env
+
+    @pytest.mark.parametrize(
+        ("env_file", "env_key", "file_override", "key_override", "expected"),
+        [
+            pytest.param(None, None, None, None, None, id="nothing_set"),
+            pytest.param("/env/license.txt", None, None, None, "MLODA_LICENSE_FILE", id="env_file_only"),
+            pytest.param(None, "env-key", None, None, "MLODA_LICENSE_KEY", id="env_key_only"),
+            pytest.param("/env/license.txt", "env-key", None, None, "MLODA_LICENSE_FILE", id="env_file_and_key"),
+            pytest.param("", "env-key", None, None, "MLODA_LICENSE_KEY", id="empty_env_file_and_env_key"),
+            pytest.param("", "", None, None, None, id="both_env_empty"),
+            pytest.param(None, "env-key", "/override/license.txt", None, "LICENSE_FILE_OVERRIDE", id="file_override"),
+            pytest.param("/env/license.txt", None, None, "override-key", "LICENSE_KEY_OVERRIDE", id="key_override"),
+            pytest.param(
+                None, None, "/override/license.txt", "override-key", "LICENSE_FILE_OVERRIDE", id="both_overrides"
+            ),
+            pytest.param(
+                "/env/license.txt", "env-key", "", None, "MLODA_LICENSE_KEY", id="empty_file_override_keeps_env"
+            ),
+            pytest.param("/env/license.txt", "env-key", "", "", None, id="both_overrides_empty_suppress_env"),
+            pytest.param(
+                "/env/license.txt", "env-key", None, "", "MLODA_LICENSE_FILE", id="empty_key_override_keeps_env_file"
+            ),
+        ],
+    )
+    def test_license_source_names_the_source_the_binary_reads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_file: str | None,
+        env_key: str | None,
+        file_override: str | None,
+        key_override: str | None,
+        expected: LicenseSource | None,
+    ) -> None:
+        monkeypatch.delenv("MLODA_LICENSE_FILE", raising=False)
+        monkeypatch.delenv("MLODA_LICENSE_KEY", raising=False)
+        if env_file is not None:
+            monkeypatch.setenv("MLODA_LICENSE_FILE", env_file)
+        if env_key is not None:
+            monkeypatch.setenv("MLODA_LICENSE_KEY", env_key)
+
+        class _LicenseSourceModel(BinaryModelMixin):
+            BINARY_PLUGIN_ID = PLUGIN_ID
+            LICENSE_FILE_OVERRIDE = file_override
+            LICENSE_KEY_OVERRIDE = key_override
+
+        assert _LicenseSourceModel.license_source() == expected
+
+    def test_license_source_ignores_a_binary_environment_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MLODA_LICENSE_FILE", raising=False)
+        monkeypatch.delenv("MLODA_LICENSE_KEY", raising=False)
+
+        class _CustomEnvModel(BinaryModelMixin):
+            BINARY_PLUGIN_ID = PLUGIN_ID
+
+            @classmethod
+            def binary_environment(cls) -> dict[str, str]:
+                return transport.minimal_environment(license_file="/custom/license.txt")
+
+        assert _CustomEnvModel.license_source() is None
 
 
 # -------------------------------------------------------------------------------------------

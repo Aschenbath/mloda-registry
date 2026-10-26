@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Any, BinaryIO, ClassVar
+from typing import Any, BinaryIO, ClassVar, Literal
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -27,6 +27,8 @@ from mloda.community.feature_groups.binary_model.errors import (
 from mloda.community.feature_groups.binary_model.transport import InvocationDirectory, minimal_environment, run_binary
 
 logger = logging.getLogger(__name__)
+
+LicenseSource = Literal["MLODA_LICENSE_FILE", "MLODA_LICENSE_KEY", "LICENSE_FILE_OVERRIDE", "LICENSE_KEY_OVERRIDE"]
 
 _STRING_CELL_BYTE_LIMIT = 2**31 - 1
 
@@ -265,9 +267,25 @@ class BinaryModelMixin:
     MAX_BATCH_ROWS: ClassVar[int] = _DEFAULT_MAX_BATCH_ROWS
 
     @classmethod
+    def _forwarded_environment(cls) -> dict[str, str]:
+        """The environment forwarded from the class attributes and the host, before any subclass fallback."""
+        return minimal_environment(license_file=cls.LICENSE_FILE_OVERRIDE, license_key=cls.LICENSE_KEY_OVERRIDE)
+
+    @classmethod
     def binary_environment(cls) -> dict[str, str]:
         """The minimal subprocess environment for this model's binary (contract: Data handling)."""
-        return minimal_environment(license_file=cls.LICENSE_FILE_OVERRIDE, license_key=cls.LICENSE_KEY_OVERRIDE)
+        return cls._forwarded_environment()
+
+    @classmethod
+    def license_source(cls) -> LicenseSource | None:
+        """The source the binary reads its license from, never its value (contract: License); a fallback
+        added in an overridden ``binary_environment`` is not seen."""
+        environment = cls._forwarded_environment()
+        if "MLODA_LICENSE_FILE" in environment:
+            return "LICENSE_FILE_OVERRIDE" if cls.LICENSE_FILE_OVERRIDE else "MLODA_LICENSE_FILE"
+        if "MLODA_LICENSE_KEY" in environment:
+            return "LICENSE_KEY_OVERRIDE" if cls.LICENSE_KEY_OVERRIDE else "MLODA_LICENSE_KEY"
+        return None
 
     @classmethod
     def resolved_binary(cls) -> ResolvedBinary:
