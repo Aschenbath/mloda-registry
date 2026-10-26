@@ -61,7 +61,8 @@ def make_hook_context(
     result_attributes: dict[str, str | int | float | bool] | None = None,
     input_check: InputCheck | None = None,
 ) -> HookContext:
-    """Build a HookContext test fixture; every keyword lands unchanged on the result."""
+    """Build a HookContext test fixture; every keyword lands on the result, except that core filters
+    declared_attributes and result_attributes to portable scalars."""
     return HookContext(
         hook=hook,
         feature_group_class=feature_group_class,
