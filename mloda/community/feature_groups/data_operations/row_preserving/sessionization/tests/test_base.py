@@ -20,7 +20,6 @@ import pytest
 from mloda.provider import FeatureChainParserMixin, FeatureSet
 from mloda.user import Feature, FeatureName, Options
 
-from mloda.community.feature_groups.data_operations.base import NameOnlyMatchMixin
 from mloda.community.feature_groups.data_operations.row_preserving.sessionization.base import (
     SESSIONIZATION_UNITS,
     SessionizationFeatureGroup,
@@ -331,7 +330,11 @@ class TestSessionizationOperationGroup(OperationGroupTestBase):
 
     @classmethod
     def mixins(cls) -> tuple[type, ...]:
-        return (NameOnlyMatchMixin, FeatureChainParserMixin)
+        return (FeatureChainParserMixin,)
+
+    @classmethod
+    def name_only_match(cls) -> bool | None:
+        return True
 
     @classmethod
     def name_probes(cls) -> list[tuple[str, str]]:

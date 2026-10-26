@@ -8,7 +8,13 @@ import re
 from typing import Any
 
 import pytest
-from mloda.provider import FeatureChainParserMixin, FeatureGroup, FeatureSet, is_match_abort
+from mloda.provider import (
+    FeatureChainParserMixin,
+    FeatureGroup,
+    FeatureSet,
+    collect_match_rejections,
+    is_match_abort,
+)
 from mloda.user import DataType, Feature, Options
 
 from mloda.community.feature_groups.data_operations.base import KeyColumnInputsMixin, always_required
@@ -27,6 +33,18 @@ from mloda.testing.feature_groups.data_operations.row_preserving.frame_aggregate
 
 class TestPatternParsing:
     """Tests for _parse_frame_feature pattern matching."""
+
+    @pytest.mark.parametrize(
+        ("feature_name", "expected"),
+        [
+            ("sales__sum_rolling_3", {"aggregation_type": "sum", "frame_size": 3}),
+            ("sales__avg_7_day_window", {"aggregation_type": "avg", "frame_size": 7, "frame_unit": "day"}),
+            ("sales__cumsum", {"aggregation_type": "sum"}),
+            ("sales__expanding_avg", {"aggregation_type": "avg"}),
+        ],
+    )
+    def test_resolve_feature_name_bindings(self, feature_name: str, expected: dict[str, Any]) -> None:
+        assert FrameAggregateFeatureGroup.resolve_feature_name(feature_name).bindings == expected
 
     def test_rolling_pattern(self) -> None:
         result = FrameAggregateFeatureGroup._parse_frame_feature("sales__sum_rolling_3")
@@ -137,6 +155,7 @@ class TestPatternMatching:
             pytest.param("sales__avg_7_banana_window", False, id="invalid_time_unit"),
             pytest.param("plain_feature", False, id="plain_feature_without_config"),
             pytest.param("sales__sum_rolling_3\n", False, id="trailing_newline"),
+            pytest.param("sales__sum_rolling_" + "9" * 5000, False, id="huge_digits"),
         ],
     )
     def test_match_by_name(self, feature_name: str, expected: bool) -> None:
@@ -605,6 +624,7 @@ class TestFrameNameAgreement:
         ("feature_name", "key", "value", "binding", "type_name"),
         [
             ("sales__sum_rolling_3", "frame_size", 5, "3", "int"),
+            ("sales__sum_rolling_3", "frame_size", 0, "3", "int"),
             ("sales__sum_rolling_3", "frame_type", "time", "rolling", "str"),
             ("sales__avg_7_day_window", "frame_size", 5, "7", "int"),
             ("sales__avg_7_day_window", "frame_unit", "hour", "day", "str"),
@@ -798,6 +818,26 @@ class TestFrameShapeParity:
             "my_result", self._config_options(malformed_config), None
         )
         assert by_config is False, f"Config path should reject: {malformed_config}"
+
+    @pytest.mark.parametrize(
+        ("feature_name", "key", "token"),
+        [
+            ("sales__banana_rolling_3", "aggregation_type", "banana"),
+            ("sales__banana_7_day_window", "aggregation_type", "banana"),
+            ("sales__cumbanana", "aggregation_type", "banana"),
+            ("sales__expanding_banana", "aggregation_type", "banana"),
+            ("sales__sum_3_fortnight_window", "frame_unit", "fortnight"),
+        ],
+    )
+    def test_unsupported_name_token_records_the_rejected_binding(self, feature_name: str, key: str, token: str) -> None:
+        with collect_match_rejections() as reasons:
+            assert (
+                FrameAggregateFeatureGroup.match_feature_group_criteria(feature_name, self._pattern_options(), None)
+                is False
+            )
+        reason = reasons[FrameAggregateFeatureGroup.get_class_name()].reason
+        assert f"'{token}'" in reason
+        assert key in reason
 
 
 class TestExtractParams:

@@ -146,6 +146,7 @@ class TestPatternMatching:
             pytest.param("value_int__bucket_3", id="wrong_suffix"),
             pytest.param("value_int__bin", id="no_number"),
             pytest.param("bin_3", id="no_source_column"),
+            pytest.param("value_int__bin_" + "9" * 5000, id="huge_digits"),
         ],
     )
     def test_no_match(self, feature_name: str) -> None:
@@ -177,6 +178,15 @@ class TestPatternParsing:
         op, n_bins = BinningFeatureGroup.get_binning_params("value_int__qbin_10")
         assert op == "qbin"
         assert n_bins == 10
+
+    @pytest.mark.parametrize(
+        ("feature_name", "expected_op", "expected_n_bins"),
+        [("value_int__bin_5", "bin", 5), ("value_int__qbin_10", "qbin", 10)],
+    )
+    def test_resolve_feature_name_bindings(self, feature_name: str, expected_op: str, expected_n_bins: int) -> None:
+        resolution = BinningFeatureGroup.resolve_feature_name(feature_name)
+        assert resolution.bindings == {"binning_op": expected_op, "n_bins": expected_n_bins}
+        assert isinstance(resolution.bindings["n_bins"], int)
 
     def test_n_bins_zero_raises(self) -> None:
         # bin_0 no longer matches the prefix pattern (n_bins must be >= 1), so the
@@ -306,11 +316,13 @@ class TestNBinsNameAgreement:
 
     @pytest.mark.parametrize("feature_name", ["value_int__bin_5", "value_int__qbin_5"])
     @pytest.mark.parametrize("placement", ["group", "context"])
-    def test_own_contradictory_n_bins_raises(self, placement: str, feature_name: str) -> None:
-        options = Options(group={"n_bins": 10}) if placement == "group" else Options(context={"n_bins": 10})
+    @pytest.mark.parametrize("value", [10, 0], ids=["contradicts", "guard_invalid_checked_first"])
+    def test_own_contradictory_n_bins_raises(self, placement: str, feature_name: str, value: int) -> None:
+        options = Options(group={"n_bins": value}) if placement == "group" else Options(context={"n_bins": value})
 
         with pytest.raises(
-            ValueError, match=r"option 'n_bins' is int 10, but the feature name encodes '5'\. The name is authoritative"
+            ValueError,
+            match=rf"option 'n_bins' is int {value}, but the feature name encodes '5'\. The name is authoritative",
         ):
             BinningFeatureGroup.match_feature_group_criteria(feature_name, options, None)
 

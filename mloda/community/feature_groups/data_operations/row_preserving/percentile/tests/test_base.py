@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-from mloda.provider import FeatureChainParserMixin, FeatureSet
+from mloda.provider import FeatureChainParserMixin, FeatureSet, collect_match_rejections
 from mloda.user import Feature, Options
 
 from mloda.community.feature_groups.data_operations.base import KeyColumnInputsMixin
@@ -173,6 +173,27 @@ class TestPatternParsing:
         result = PercentileFeatureGroup.get_percentile_value(feature_name)
         assert result == expected
 
+    @pytest.mark.parametrize(
+        ("feature_name", "expected"),
+        [
+            pytest.param("value_int__p50_percentile", 0.5, id="p50"),
+            pytest.param("value_int__p0_percentile", 0.0, id="p0"),
+            pytest.param("value_int__p100_percentile", 1.0, id="p100"),
+        ],
+    )
+    def test_resolve_feature_name_binds_converted_percentile(self, feature_name: str, expected: float) -> None:
+        resolution = PercentileFeatureGroup.resolve_feature_name(feature_name)
+        assert resolution.bindings == {"percentile": expected}
+
+    @pytest.mark.parametrize(
+        "token",
+        [pytest.param("p150", id="p150"), pytest.param("p" + "9" * 5000, id="huge_digits")],
+    )
+    def test_resolve_feature_name_out_of_range_percentile_is_rejected_binding(self, token: str) -> None:
+        resolution = PercentileFeatureGroup.resolve_feature_name(f"value_int__{token}_percentile")
+        assert "percentile" not in resolution.bindings
+        assert resolution.rejected_bindings == {"percentile": token}
+
     def test_parse_source_feature(self) -> None:
         feature = Feature(
             "value_int__p50_percentile",
@@ -291,6 +312,17 @@ class TestRejectionReporting:
             assert reason is not None
             assert "percentile" in reason
 
+    def test_out_of_range_percentile_name_records_the_rejected_binding(self) -> None:
+        options = Options(context={"partition_by": ["region"]})
+        with collect_match_rejections() as reasons:
+            assert (
+                PercentileFeatureGroup.match_feature_group_criteria("value_int__p150_percentile", options, None)
+                is False
+            )
+        reason = reasons[PercentileFeatureGroup.get_class_name()].reason
+        assert "percentile" in reason
+        assert "'p150'" in reason
+
     def test_valid_percentile_reports_nothing(self) -> None:
         options = Options(
             context={
@@ -353,7 +385,7 @@ class TestPercentileNameAgreement:
 
         with pytest.raises(
             ValueError,
-            match=r"option 'percentile' is float 0\.75, but the feature name encodes '0\.5'\. The name is authoritative",
+            match=r"option 'percentile' is float 0\.75, but the feature name encodes 'p50'\. The name is authoritative",
         ):
             PercentileFeatureGroup.match_feature_group_criteria("value_int__p50_percentile", options, None)
 
