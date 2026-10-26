@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import Any, TypeVar
 
-from mloda.provider import FeatureChainParserMixin
 from mloda.user import Feature, FeatureName, Options
 
 from mloda.community.feature_groups.data_operations.mask_utils import MASK_KEY, parse_mask_spec
@@ -360,7 +359,3 @@ def name_matches_prefix(cls: Any, feature_name: Any) -> bool:
 def is_own_option(options: Any, key: str) -> bool:
     """True if the option is set and is the feature's own, not purely forwarded."""
     return options.get(key) is not None and bool(options.is_own(key))
-
-
-# Deprecated alias: released leaves still import this name.
-RejectionReasonMixin = FeatureChainParserMixin

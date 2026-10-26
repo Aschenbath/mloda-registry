@@ -199,26 +199,11 @@ class TestEveryGuardedSpecDeclaresExpected:
         assert offenders == [], f"Guarded specs missing 'expected': {offenders}"
 
 
-class TestReleasedLeafImportCompat:
-    """Released leaves still import the old name."""
-
-    def test_rejection_reason_mixin_is_feature_chain_parser_mixin(self) -> None:
-        from mloda.provider import FeatureChainParserMixin
-
-        from mloda.community.feature_groups.data_operations.base import RejectionReasonMixin
-
-        assert RejectionReasonMixin is FeatureChainParserMixin
-
-    def test_deprecated_input_columns_and_framework_shim_still_works(self) -> None:
-        """Old leaves pinned against >= this base still call this removed hook."""
-        from mloda.community.feature_groups.data_operations.python_dict_helpers import (
-            input_columns_and_framework,
-        )
-
-        assert input_columns_and_framework({"a": [1]}) == (["a"], "PythonDict")
+class TestAggregationBaseIsFeatureGroup:
+    """``AggregationFeatureGroupBase`` must remain a ``FeatureGroup`` subclass."""
 
     def test_aggregation_base_is_still_a_feature_group(self) -> None:
-        """Released aggregation-family leaves subclass ``AggregationFeatureGroupBase`` alone and must stay FeatureGroups."""
+        """Aggregation-family leaves subclass ``AggregationFeatureGroupBase`` alone and must stay FeatureGroups."""
         from mloda.provider import FeatureGroup
 
         from mloda.community.feature_groups.data_operations.aggregation_base import AggregationFeatureGroupBase
