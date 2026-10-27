@@ -298,6 +298,56 @@ def test_recipe_plan_matches_lock() -> None:
 
 `check_plan_lock` never writes: it raises `PlanLockMismatchError` with a diff when the plan drifts, or with the content to write when the lock is missing. Regenerate with `UPDATE_PLAN_LOCKS=1 pytest ...` (the test's own switch, not an mloda setting), review the diff and commit the lock file. The lock records each feature group, reader and framework by `module:qualname`, so moving a class or upgrading mloda can change it too (mloda 0.16.0 moved the lock format to 5, adding input wiring and join keys, so rewrite each lock once after upgrading); they must live in an importable module, since `write_plan_lock` refuses classes defined in `__main__`.
 
+## Local Services and Subprocess Environments
+
+Use `mloda.testing.network.recording_http_server()` for a local service stand-in. It binds only to `127.0.0.1` on an ephemeral port, exposes its endpoint as `server.url`, and records raw POST bytes in `server.bodies`. Successful requests receive HTTP 200 with JSON `{}`. Only POST with a single nonnegative `Content-Length` is supported; other methods and `Transfer-Encoding` (including chunked bodies) are rejected. Socket I/O has a one-second timeout, so clients must keep requests moving; stalled headers or bodies cannot prevent thread cleanup on Windows. Exiting the context closes incomplete requests and finishes the server's threads. Recorded bodies remain readable afterward.
+
+`subprocess_env()` copies the current environment, sets `DO_NOT_TRACK=1`, and removes all keys ending in `_proxy`, including `NO_PROXY`, case-insensitively. It replaces every casing variant of `DO_NOT_TRACK` with one uppercase key, preventing conflicting values in Windows subprocesses. Pass a mapping to copy only those values; `{}` does not inherit the current environment. Neither the mapping nor `os.environ` is modified. A plugin's explicit configuration mapping can bypass the subprocess environment, so prepare both separately and explicitly redirect the plugin's service endpoint:
+
+```python
+import json
+import subprocess
+import sys
+
+from mloda.testing.network import recording_http_server, subprocess_env
+
+
+def test_plugin_posts_to_local_service() -> None:
+    child = """
+import json
+import os
+import sys
+from urllib.request import Request, urlopen
+
+config = json.load(sys.stdin)
+assert os.environ["DO_NOT_TRACK"] == "1"
+assert config["DO_NOT_TRACK"] == "1"
+request = Request(config["PLUGIN_ENDPOINT"], data=b"synthetic plugin result", method="POST")
+with urlopen(request, timeout=3) as response:
+    assert json.load(response) == {}
+"""
+    with recording_http_server() as server:
+        plugin_env = subprocess_env(
+            {
+                "PLUGIN_ENDPOINT": server.url,
+                "DO_NOT_TRACK": "0",
+                "HTTPS_PROXY": "http://127.0.0.1:9",
+            }
+        )
+        subprocess.run(
+            [sys.executable, "-c", child],
+            input=json.dumps(plugin_env),
+            env=subprocess_env(),
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        assert server.bodies == [b"synthetic plugin result"]
+```
+
+`DO_NOT_TRACK` only affects clients that honor it. These helpers are not an OS or network sandbox: redirect every service endpoint your test uses to an appropriate local stand-in.
+
 ## Testing What an Import Loads
 
 A packaging check alongside Level 1: which plugin modules an import pulls in and which FeatureGroups it loads (see [Package Layout](../04-create-plugin-package.md#package-layout-and-import-time-discovery)). Probe a fresh interpreter, because the test process has already imported every FeatureGroup:
