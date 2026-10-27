@@ -21,6 +21,7 @@ from mloda.community.feature_groups.data_operations.base import (
     assert_source_columns_present,
     is_op_token,
     op_token_value,
+    unique_features,
 )
 
 STRING_OPS = {
@@ -144,7 +145,7 @@ class StringFeatureGroup(FeatureChainParserMixin, OperationFeatureGroup):
         """Shared loop: extract params from each feature, delegate to ``compute_string``."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

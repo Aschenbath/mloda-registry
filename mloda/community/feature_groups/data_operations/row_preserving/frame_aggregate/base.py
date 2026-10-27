@@ -37,6 +37,7 @@ from mloda.community.feature_groups.data_operations.base import (
     op_token_value,
     option_value,
     positive_int_value,
+    unique_features,
 )
 from mloda.community.feature_groups.data_operations.base import (
     FRAME_SIZE as _FRAME_SIZE_KEY,
@@ -484,7 +485,7 @@ class FrameAggregateFeatureGroup(KeyColumnInputsMixin, FeatureChainParserMixin, 
         """Shared loop: extract params from each feature, delegate to ``compute_frame``."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
             params = cls._extract_params(feature)
             assert_source_columns_present(data, [params["source_col"]])

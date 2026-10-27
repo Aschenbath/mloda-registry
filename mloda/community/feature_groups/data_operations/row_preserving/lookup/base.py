@@ -44,6 +44,7 @@ from mloda.community.feature_groups.data_operations.base import (
     is_op_token,
     op_token_value,
     option_value,
+    unique_features,
 )
 
 ON_UNMATCHED_POLICIES: dict[str, str] = {
@@ -348,7 +349,7 @@ class LookupFeatureGroup(FeatureChainParserMixin, OperationFeatureGroup):
         """Shared loop: validate each feature, delegate to ``compute_lookup``."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = str(feature.name)
 
             source_col = cls._extract_single_source_feature(feature)

@@ -35,6 +35,7 @@ from mloda.community.feature_groups.data_operations.base import (
     OP_TOKEN_EXPECTED,
     assert_source_columns_present,
     is_op_token,
+    unique_features,
 )
 from mloda.community.feature_groups.data_operations.row_preserving.arithmetic.base import ArithmeticOpMixin
 
@@ -105,7 +106,7 @@ class PointArithmeticFeatureGroup(ArithmeticOpMixin, OperationFeatureGroup):
         """Shared loop: one new column ``col_a {op} col_b`` per feature, null in either operand gives null."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_features = cls._extract_validated_source_features(feature)

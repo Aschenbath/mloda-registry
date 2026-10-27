@@ -355,6 +355,28 @@ class TestCalculateFeatureRejections:
 
 
 class TestIntegration:
+    def test_requested_feature_is_also_a_chained_input(self, key_env: str) -> None:
+        rows: dict[str, list[Any]] = {"email": ["alpha", None, "gamma"]}
+        direct = _string_feature()
+        consumer = Feature(
+            f"{direct.name}__hmac_sha256_pseudonymized",
+            Options(context={"pii_key_env": key_env, "in_features": [_string_feature()]}),
+        )
+
+        results = mloda.run_all(
+            [direct, consumer],
+            compute_frameworks=[PyArrowTable],
+            api_data={"AnonymizerData": rows},
+            plugin_collector=PluginCollector.enabled_feature_groups({ApiDataFG, StubAnonymizer}),
+        )
+
+        for table in results:
+            assert isinstance(table, pa.Table)
+            assert len(table.column_names) == len(set(table.column_names))
+        expected = compute_expected_hmac_sha256_column(rows["email"], KNOWN_ANSWER_KEY)
+        assert _result_column(results, direct.name) == expected
+        assert _result_column(results, consumer.name) == compute_expected_hmac_sha256_column(expected, KNOWN_ANSWER_KEY)
+
     def test_config_form_end_to_end(self, key_env: str) -> None:
         rows: dict[str, list[Any]] = {"email": ["alpha", None, "gamma"]}
         results = mloda.run_all(

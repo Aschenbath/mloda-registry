@@ -29,6 +29,7 @@ from mloda.community.feature_groups.data_operations.base import (
     is_parametric_suffix,
     op_token_value,
     option_value,
+    unique_features,
 )
 
 _RANK_TYPES = {
@@ -283,7 +284,7 @@ class RankFeatureGroup(KeyColumnInputsMixin, FeatureChainParserMixin, OperationF
         """
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             # rank never reads its source column; this call only enforces the in_features count.

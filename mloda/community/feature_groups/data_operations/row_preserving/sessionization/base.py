@@ -65,6 +65,7 @@ from mloda.community.feature_groups.data_operations.base import (
     column_ref_value,
     is_column_ref,
     key_column_features,
+    unique_features,
 )
 
 # Supported sessionization units mapped to their length in seconds. The four
@@ -205,7 +206,7 @@ class SessionizationFeatureGroup(FeatureChainParserMixin, OperationFeatureGroup)
         """Compute one session-id column per feature in ``features``."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

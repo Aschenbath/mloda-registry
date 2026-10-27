@@ -79,7 +79,11 @@ class BinaryExampleFeatureGroup(BinaryModelMixin, FeatureGroup):
     @classmethod
     def calculate_feature(cls, data: pa.Table, features: FeatureSet) -> pa.Table:
         runs: dict[tuple[str, tuple[str, ...], str], pa.ChunkedArray] = {}  # identical options share one binary run
+        written: set[str] = set()
         for feature in features.features:
+            if feature.name in written:
+                continue
+            written.add(feature.name)
             columns: Sequence[str] = feature.options.get(cls.INPUT_COLUMNS)
             parameters: Mapping[str, Any] = feature.options.get(cls.PARAMETERS) or {}
             operation = feature.options.get(cls.OPERATION)

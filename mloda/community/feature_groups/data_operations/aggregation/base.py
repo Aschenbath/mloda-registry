@@ -27,6 +27,7 @@ from mloda.community.feature_groups.data_operations.base import (
     assert_single_grid,
     assert_source_columns_present,
     is_op_token,
+    unique_features,
 )
 from mloda.community.feature_groups.data_operations.mask_utils import MASK_KEY, parse_mask_spec
 
@@ -205,7 +206,7 @@ class AggregationFeatureGroup(AggregationFeatureGroupBase, OperationFeatureGroup
             "aggregation",
             [cls._extract_single_source_feature(f) for f in features.features],
         )
-        for feature in sorted(features.features, key=lambda f: str(f.name)):
+        for feature in sorted(unique_features(features.features), key=lambda f: str(f.name)):
             source_col = cls._extract_single_source_feature(feature)
             assert_source_columns_present(data, [source_col], hint=SPLIT_REDUCING_FEATURE_SET_HINT)
             agg_type = cls._extract_aggregation_type(feature)

@@ -61,6 +61,7 @@ from mloda.community.feature_groups.data_operations.base import (
     assert_source_columns_present,
     column_ref_value,
     is_column_ref,
+    unique_features,
 )
 
 
@@ -136,7 +137,7 @@ class EmaFeatureGroup(KeyColumnInputsMixin, FeatureChainParserMixin, OperationFe
         """Compute one EMA column per feature in ``features``."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

@@ -6,12 +6,14 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
+from mloda.provider import ApiDataFG
 from mloda.user import Feature, FeatureResolutionError, Options, PluginCollector, mloda
 from mloda_plugins.compute_framework.base_implementations.pyarrow.table import PyArrowTable
 
 from mloda.community.feature_groups.data_operations.row_preserving.binning import manifest  # noqa: F401
 from mloda.community.feature_groups.data_operations.row_preserving.binning.base import BinningFeatureGroup
 from mloda.testing.data_creator.pyarrow import PyArrowDataOpsTestDataCreator
+from mloda.testing.feature_groups.data_operations.helpers import extract_column, result_column_names
 from mloda.testing.feature_groups.data_operations.integration import DataOpsIntegrationTestBase
 from mloda.testing.feature_groups.data_operations.mixins.operation_group_integration import (
     OperationGroupIntegrationTestMixin,
@@ -113,6 +115,27 @@ class TestBinningIntegration(OperationGroupIntegrationTestMixin, DataOpsIntegrat
 
 class TestIntegrationMultipleFeatures:
     """Test multiple binning features in a single run_all call."""
+
+    def test_requested_feature_is_also_a_chained_input(self) -> None:
+        direct = Feature("value_int__bin_3")
+        consumer = Feature("value_int__bin_3__bin_5")
+
+        results = mloda.run_all(
+            [direct, consumer],
+            compute_frameworks=[PyArrowTable],
+            api_data={"BinningData": {"value_int": [0, 10, 20, 30, None]}},
+            plugin_collector=PluginCollector.enabled_feature_groups({ApiDataFG, BinningFeatureGroup}),
+        )
+
+        expected = {
+            direct.name: [0, 1, 2, 2, None],
+            consumer.name: [0, 2, 4, 4, None],
+        }
+        for name, values in expected.items():
+            tables = [table for table in results if name in result_column_names(table)]
+            assert len(tables) == 1
+            assert result_column_names(tables[0]).count(name) == 1
+            assert extract_column(tables[0], name) == values
 
     def test_bin_3_and_bin_5_together(self) -> None:
         """Request both bin_3 and bin_5 features in one pipeline run."""

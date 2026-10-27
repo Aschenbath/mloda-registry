@@ -54,6 +54,7 @@ from mloda.community.feature_groups.data_operations.base import (
     assert_source_columns_present,
     is_op_token,
     op_token_value,
+    unique_features,
 )
 
 TIME_BUCKETIZATION_OPS: dict[str, str] = {
@@ -246,7 +247,7 @@ class TimeBucketizationFeatureGroup(FeatureChainParserMixin, OperationFeatureGro
         """
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

@@ -23,6 +23,7 @@ from mloda.community.feature_groups.data_operations.base import (
     is_positive_int,
     op_token_value,
     positive_int_value,
+    unique_features,
 )
 
 BINNING_OPS = {
@@ -125,7 +126,7 @@ class BinningFeatureGroup(FeatureChainParserMixin, OperationFeatureGroup):
         """Shared loop: extract params from each feature, delegate to ``compute_binning``."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

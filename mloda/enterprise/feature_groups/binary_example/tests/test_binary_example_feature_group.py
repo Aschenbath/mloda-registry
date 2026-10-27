@@ -25,6 +25,10 @@ from mloda.community.feature_groups.binary_model.errors import (
     LicenseMissingError,
 )
 from mloda.community.feature_groups.binary_model.transport import run_binary as real_run_binary
+from mloda.community.feature_groups.data_operations.row_preserving.binning import (
+    manifest as binning_manifest,  # noqa: F401
+)
+from mloda.community.feature_groups.data_operations.row_preserving.binning.base import BinningFeatureGroup
 from mloda.enterprise.feature_groups.binary_example import manifest as binary_example_manifest
 from mloda.enterprise.feature_groups.binary_example.binary_example_feature_group import BinaryExampleFeatureGroup
 from mloda.testing.base import FeatureGroupTestBase
@@ -346,6 +350,29 @@ class TestCalculateFeatureRejections:
 
 
 class TestIntegration:
+    def test_requested_feature_is_also_a_chained_input(self) -> None:
+        rows: dict[str, list[Any]] = {"col_a": ["alpha", "alpha", "alpha"]}
+        direct = _hash_feature("hashed", ["col_a"])
+        consumer = Feature(
+            "hashed__bin_1",
+            Options(context={"in_features": [_hash_feature("hashed", ["col_a"])]}),
+        )
+
+        results = mloda.run_all(
+            [direct, consumer],
+            compute_frameworks=[PyArrowTable],
+            api_data={"BinaryExampleData": rows},
+            plugin_collector=PluginCollector.enabled_feature_groups({ApiDataFG, StubExample, BinningFeatureGroup}),
+        )
+
+        columns: dict[str, list[Any]] = {}
+        for table in results:
+            assert isinstance(table, pa.Table)
+            assert len(table.column_names) == len(set(table.column_names))
+            columns.update(table.to_pydict())
+        assert columns[direct.name] == compute_expected_hash_column(rows, ["col_a"], None)
+        assert columns[consumer.name] == [0, 0, 0]
+
     def test_single_hashed_feature_end_to_end(self) -> None:
         rows: dict[str, list[Any]] = {"col_a": ["alpha", "beta", "gamma"], "col_b": ["x", "y", "z"]}
         feature = _hash_feature("hashed", ["col_a", "col_b"])

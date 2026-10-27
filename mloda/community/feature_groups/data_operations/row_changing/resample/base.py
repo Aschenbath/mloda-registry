@@ -65,6 +65,7 @@ from mloda.community.feature_groups.data_operations.base import (
     is_column_ref,
     is_op_token,
     op_token_value,
+    unique_features,
 )
 
 # Order-independent aggregations supported in v1. Order-dependent aggregations
@@ -260,7 +261,7 @@ class ResampleFeatureGroup(KeyColumnInputsMixin, FeatureChainParserMixin, Operat
             "resample",
             [cls._extract_single_source_feature(f) for f in features.features],
         )
-        for feature in sorted(features.features, key=lambda f: str(f.name)):
+        for feature in sorted(unique_features(features.features), key=lambda f: str(f.name)):
             source_col = cls._extract_single_source_feature(feature)
             n, unit, agg = _parse_resample_op(cls._extract_resample_op(feature))
             partition_by = cls._extract_partition_by(feature)

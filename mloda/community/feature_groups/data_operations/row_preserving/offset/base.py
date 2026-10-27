@@ -30,6 +30,7 @@ from mloda.community.feature_groups.data_operations.base import (
     is_parametric_suffix,
     op_token_value,
     option_value,
+    unique_features,
 )
 
 _OFFSET_TYPES = {
@@ -252,7 +253,7 @@ class OffsetFeatureGroup(KeyColumnInputsMixin, FeatureChainParserMixin, Operatio
         """Shared loop: extract params from each feature, delegate to compute_offset."""
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

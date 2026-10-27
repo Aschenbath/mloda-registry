@@ -57,7 +57,11 @@ class AnonymizerFeatureGroup(BinaryModelMixin, FeatureChainParserMixin, FeatureG
 
     @classmethod
     def calculate_feature(cls, data: pa.Table, features: FeatureSet) -> pa.Table:
+        written: set[str] = set()
         for feature in features.features:
+            if feature.name in written:
+                continue
+            written.add(feature.name)
             algorithm = cls._resolve_operation(feature, cls.ALGORITHM)
             if algorithm is None:
                 raise BinaryUsageError(f"{cls.ALGORITHM} is required")

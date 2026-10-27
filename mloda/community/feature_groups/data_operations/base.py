@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
 from typing import Any, TypeVar
 
@@ -339,6 +339,16 @@ def key_column_features(
 
     taken = {str(source.name) for source in sources}
     return {Feature(name) for name in dict.fromkeys(names) if name not in taken}
+
+
+def unique_features(features: Iterable[Feature]) -> Iterator[Feature]:
+    """Yield the first original Feature per name, preserving input iteration order and its options."""
+    seen: set[str] = set()
+    for feature in features:
+        if feature.name in seen:
+            continue
+        seen.add(feature.name)
+        yield feature
 
 
 class KeyColumnInputsMixin:

@@ -45,7 +45,7 @@ def calculate_feature(cls, data: Any, features: FeatureSet) -> Any:
 
 ### The Same Name Can Arrive Twice
 
-A feature requested directly and also as another requested feature's input reaches your group twice in one FeatureSet: same name, different options (the input copy carries forwarded options), so the set keeps both. Assignment like `data[name] = ...` just overwrites, but an append-style API adds a second column of that name, and the later lookup by name fails (PyArrow: `KeyError: 'Field "<name>" exists 2 times in schema'`). Write each name once:
+A feature requested directly and also as another requested feature's input can reach your group twice in one FeatureSet. The copies can differ in request metadata such as `child_options`, so both remain in the set even when their `Feature.options` are identical. Assignment like `data[name] = ...` just overwrites, but an append-style API adds a second column of that name, and the later lookup by name fails (PyArrow: `KeyError: 'Field "<name>" exists 2 times in schema'`). Write each name once per call, using the first Feature encountered for that name:
 
 ```py
 @classmethod
@@ -58,6 +58,10 @@ def calculate_feature(cls, data: pa.Table, features: FeatureSet) -> pa.Table:
         data = data.append_column(feature.name, compute(data, feature))
     return data
 ```
+
+Keep `written` local to each call and populate it only from the current FeatureSet. A requested output name already present in the input frame must still follow the group's usual collision checks. The selected Feature supplies its options unchanged, and the original FeatureSet remains intact.
+
+The registry's data-operation groups apply this in their shared loops; `BinaryExampleFeatureGroup` and `AnonymizerFeatureGroup` also write each requested name once per call.
 
 ## Return Contract
 

@@ -33,6 +33,7 @@ from mloda.community.feature_groups.data_operations.base import (
     is_own_option,
     op_token_value,
     option_value,
+    unique_features,
 )
 from mloda.community.feature_groups.data_operations.mask_utils import MASK_KEY, parse_mask_spec
 
@@ -238,7 +239,7 @@ class WindowAggregationFeatureGroup(AggregationFeatureGroupBase, OperationFeatur
         """
         table = data
 
-        for feature in features.features:
+        for feature in unique_features(features.features):
             feature_name = feature.name
 
             source_col = cls._extract_single_source_feature(feature)

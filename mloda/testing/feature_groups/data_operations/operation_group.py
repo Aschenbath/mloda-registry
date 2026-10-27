@@ -21,7 +21,7 @@ from typing import Any, ClassVar, NamedTuple
 
 import pytest
 from mloda.provider import FeatureChainParserMixin, FeatureGroup, FeatureSet, Implementation, OperationFeatureGroup
-from mloda.user import Options
+from mloda.user import Feature, Options
 
 from mloda.testing.feature_groups.data_operations.mixins.case_parametrization import CaseParametrizationTestMixin
 
@@ -178,6 +178,45 @@ class OperationGroupTestBase(CaseParametrizationTestMixin, ABC):
     def test_group_owns_the_loop_and_no_per_framework_compute(self) -> None:
         assert callable(getattr(self.group_class(), self.loop_method()))
         assert not hasattr(self.group_class(), self.compute_method())
+
+    def test_shared_loop_writes_same_named_features_once(self) -> None:
+        """A directly requested feature and its input twin must produce only one output column."""
+        group = self.group_class()
+        features = self.probe_feature_set()
+        (direct,) = features.features
+        twin = Feature(
+            direct.name,
+            Options(
+                group=dict(direct.options.group),
+                context={**direct.options.context, "consumer_trace": "requested as an input"},
+            ),
+        )
+        features.add(twin)
+        assert len(features.features) == 2
+        assert features.get_all_names() == (direct.name,)
+
+        sources = group().input_features(direct.options, direct.name)
+        assert sources
+        data: dict[str, list[Any]] = {str(source.name): [] for source in sources}
+        written: list[str] = []
+
+        def record_compute(table: Any, output: Any, *_args: Any) -> Any:
+            # Row reducers send a batch of specs; row-preserving loops send one name per call.
+            if isinstance(output, str):
+                written.append(output)
+            else:
+                written.extend(spec.feature_name for spec in output)
+            return table
+
+        loop = getattr(group, self.loop_method())
+        callbacks: dict[str, Any] = {self.compute_method().removeprefix("_"): record_compute}
+        for guard in ("non_numeric", "assert_timestamp"):
+            if guard in inspect.signature(loop).parameters:
+                callbacks[guard] = lambda *_args: None
+
+        assert loop(data, features, **callbacks) is data
+        assert written == [direct.name]
+        assert features.features == {direct, twin}
 
     def test_group_needs_an_implementation_on_the_feature_set(self) -> None:
         """calculate_feature dispatches to the step's implementation; none on the feature set is an error."""
