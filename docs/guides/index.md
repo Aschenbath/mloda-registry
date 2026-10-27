@@ -41,6 +41,7 @@ Extend mloda's capabilities with custom plugins.
 - [Create a feature group](09-create-feature-group.md) - Detailed feature group creation
 - [Create a compute framework plugin](10-create-compute-framework.md) - Add support for new data libraries
 - [Create an extender plugin](11-create-extender.md) - Add logging, tracing, and metrics
+- [Product analytics](12-export-telemetry.md#product-analytics) - Choose a replaceable capture sink and enforce export constraints
 
 ---
 

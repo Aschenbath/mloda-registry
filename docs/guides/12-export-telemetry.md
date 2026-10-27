@@ -200,6 +200,21 @@ processors:
 
 It sees what passes through the Collector only; OpenLineage events go straight to their transport.
 
+## Product analytics
+
+OTel spans and metrics answer operational questions about performance and failures; OpenLineage describes lineage. Product analytics asks which installations return and how much each installation uses a plugin, through a small, closed event schema.
+
+For product analytics, prefer plain HTTPS capture behind a replaceable `capture(event)` function or sink. Keep event construction independent of the backend so the transport can change; the [PostHog Capture API](https://posthog.com/docs/api/capture) is one HTTP example.
+
+Plugin authors must enforce these constraints before export, whichever transport they choose:
+
+- Export no feature names, column names or data values.
+- Use a randomly generated, persistent installation ID; never derive it from user, machine or project contents.
+- Honor the `DO_NOT_TRACK` environment variable by suppressing product analytics export when opted out. Implement this check in the plugin's analytics path; the existing extenders do not read it.
+- Allowlist event names and properties with a closed schema; reject arbitrary context and exception messages.
+
+Existing extenders follow the [privacy defaults](#privacy-defaults) above, which permit feature and column names in spans and lineage events. Use short send timeouts and keep analytics failures from changing core results. In tests, replace the sink with a local endpoint to inspect payloads and exercise opt-out and failure behavior.
+
 ## OpenLineage
 
 `OpenLineageExtender(use_sdk_defaults=True)` uses openlineage-python's own configuration, with no vendor code in mloda: `OPENLINEAGE_URL` (plus `OPENLINEAGE_API_KEY`), or `OPENLINEAGE_CONFIG` / `openlineage.yml` / `OPENLINEAGE__TRANSPORT__*` for any openlineage-python transport (`http`, `async_http`, `kafka` with `openlineage-python[kafka]`, cloud transports, `composite`). With nothing configured it falls back to the console transport, which logs every full event at INFO; set `OPENLINEAGE_DISABLED=true` to turn it off. Emission runs on the calculation thread, so prefer `async_http` or a short timeout. See [Sink Resolution](11-create-extender.md#sink-resolution) and [Emitting on the calculation thread](11-create-extender.md#emitting-on-the-calculation-thread).
